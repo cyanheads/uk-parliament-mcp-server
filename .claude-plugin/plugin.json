@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "uk-parliament-mcp-server",
+  "version": "0.1.0",
+  "description": "Search UK Parliament bills, members, votes, Hansard, written questions, and committees via MCP. STDIO or Streamable HTTP.",
+  "author": {
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
+  },
+  "homepage": "https://github.com/cyanheads/uk-parliament-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/uk-parliament-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": ["mcp", "mcp-server", "model-context-protocol", "ai-agents", "ai-tools", "typescript", "cyanheads", "uk-parliament", "hansard", "legislation", "politics"],
+  "mcpServers": {
+    "uk-parliament-mcp-server": {
+      "command": "npx",
+      "args": ["-y", "@cyanheads/uk-parliament-mcp-server"],
+      "env": {
+        "MCP_TRANSPORT_TYPE": "stdio"
+      }
+    }
+  }
+}

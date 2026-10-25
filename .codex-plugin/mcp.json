@@ -1,0 +1,9 @@
+{
+  "uk-parliament-mcp-server": {
+    "command": "npx",
+    "args": ["-y", "@cyanheads/uk-parliament-mcp-server"],
+    "env": {
+      "MCP_TRANSPORT_TYPE": "stdio"
+    }
+  }
+}
