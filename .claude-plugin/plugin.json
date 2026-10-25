@@ -11,7 +11,7 @@
   "homepage": "https://github.com/cyanheads/uk-parliament-mcp-server#readme",
   "repository": "https://github.com/cyanheads/uk-parliament-mcp-server",
   "license": "Apache-2.0",
-  "keywords": ["mcp", "mcp-server", "model-context-protocol", "ai-agents", "ai-tools", "typescript", "cyanheads", "uk-parliament", "hansard", "legislation", "politics"],
+  "keywords": ["mcp", "mcp-server", "model-context-protocol", "ai-agents", "ai-tools", "typescript", "bun", "stdio", "streamable-http", "cyanheads", "uk-parliament", "hansard", "legislation", "politics", "westminster", "written-questions", "committees", "parliamentary-votes"],
   "mcpServers": {
     "uk-parliament-mcp-server": {
       "command": "npx",

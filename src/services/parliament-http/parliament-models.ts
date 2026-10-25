@@ -106,14 +106,13 @@ export const PageSchema = z.object({
 export type Page = z.infer<typeof PageSchema>;
 /** Shared caller workload request; clamp to each collection cap after parsing. */
 export const LimitSchema = z.number().int().positive().max(Number.MAX_SAFE_INTEGER).default(10);
+/** Advertise date syntax while leaving calendar and range errors to handlers. */
+export const DateShapeSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 /** Check calendar dates before any I/O. */
-export const DateSchema = z
-  .string()
-  .regex(/^\d{4}-\d{2}-\d{2}$/)
-  .refine((value) => {
-    const date = new Date(`${value}T00:00:00Z`);
-    return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
-  }, 'Use a real YYYY-MM-DD calendar date.');
+export const DateSchema = DateShapeSchema.refine((value) => {
+  const date = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+}, 'Use a real YYYY-MM-DD calendar date.');
 /** Reject reversed date ranges without dropping either bound. */
 export function validateDateRange(from?: string, to?: string): void {
   if (

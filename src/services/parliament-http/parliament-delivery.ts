@@ -124,7 +124,9 @@ function typeOf(value: unknown): z.infer<typeof ValueTypeSchema> {
 function fenced(value: unknown): string {
   const text = json(value);
   const fences = text.match(/`+/g) ?? [];
-  const fence = '`'.repeat(Math.max(3, ...fences.map((run) => run.length + 1)));
+  let fenceLength = 3;
+  for (const run of fences) fenceLength = Math.max(fenceLength, run.length + 1);
+  const fence = '`'.repeat(fenceLength);
   return `${fence}json\n${text}\n${fence}`;
 }
 /** Render every value recursively; source strings remain reversible JSON and links stay live. */
@@ -323,6 +325,7 @@ export function deliverPayload<T extends object, E extends object = object>(
   };
   const makeCursor = (path: string, arm: 'entries' | 'fragment', offset: number) =>
     encodeCursor({ v: 1, binding, revision, path, arm, offset });
+  const text = json(selected);
   const complete: ContentDelivery = {
     ...retained,
     delivery: 'fragment',
@@ -330,10 +333,10 @@ export function deliverPayload<T extends object, E extends object = object>(
     contentPage: {
       path: cursor.path,
       kind,
-      fragment: json(selected),
+      fragment: text,
       encoding: 'json',
       offset: 0,
-      totalCodeUnits: json(selected).length,
+      totalCodeUnits: text.length,
       hasMore: false,
     },
   };
@@ -379,7 +382,6 @@ export function deliverPayload<T extends object, E extends object = object>(
     return finish(result);
   }
   if (cursor.arm !== 'fragment' && options.contentCursor) return invalidCursor();
-  const text = json(selected);
   if (
     cursor.offset >= text.length ||
     (cursor.offset > 0 &&

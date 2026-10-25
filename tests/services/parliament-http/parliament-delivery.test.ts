@@ -102,6 +102,20 @@ function reconstruct(
 }
 
 describe('lossless content delivery', () => {
+  it.each([
+    ['many short runs', '`a'.repeat(150000), '```'],
+    ['one long run', '`'.repeat(100), '`'.repeat(101)],
+    ['ordinary text', 'Ordinary source text.', '```'],
+  ])(
+    'renders %s with a reversible complete scalar and an adequate fence',
+    (_name, value, fence) => {
+      expect(process.release.name).toBe('node');
+      expect(formatData({ nameContains: value })).toEqual([
+        { type: 'text', text: `/nameContains\n${fence}json\n${JSON.stringify(value)}\n${fence}` },
+      ]);
+    },
+  );
+
   it('retains source, identity and actual collection page on outline and fragment surfaces', () => {
     const source: Source = {
       api: 'members',

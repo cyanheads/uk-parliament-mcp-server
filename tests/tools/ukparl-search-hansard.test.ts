@@ -3,6 +3,7 @@
  * @module tests/tools/ukparl-search-hansard.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -100,6 +101,106 @@ afterEach(() => {
   vi.useRealTimers();
 });
 describe('ukparl_search_hansard', () => {
+  it.each(['startDate', 'endDate'])('advertises the YYYY-MM-DD pattern for %s', (field) => {
+    const schema = z.toJSONSchema(ukparlSearchHansard.input, {
+      io: 'input',
+      target: 'draft-2020-12',
+    });
+    expect(schema.properties?.[field]).toMatchObject({
+      type: 'string',
+      pattern: '^\\d{4}-\\d{2}-\\d{2}$',
+    });
+  });
+
+  it.each(['startDate', 'endDate'])(
+    'rejects syntactically invalid %s in input validation before I/O',
+    async (field) => {
+      const requests = installHansard(() => spoken([]));
+      const result = await runToolContract(ukparlSearchHansard, { [field]: '2026-1-01' });
+      expect(result.structuredContent).toMatchObject({
+        error: { code: JsonRpcErrorCode.InvalidParams, data: { issues: expect.any(Array) } },
+      });
+      expect(text(result)).toContain(field);
+      expect(requests).toEqual([]);
+    },
+  );
+  it.each([-1, -2, -2147483648, '-1', '-27', 0, '0'])(
+    'preserves source speaker sentinel %j without exposing a Members join on either surface',
+    async (MemberId) => {
+      const requests = installHansard(() => spoken([{ ...contribution(), MemberId }], 2));
+      const result = await runToolContract(ukparlSearchHansard, {
+        startDate: '1803-11-22',
+        endDate: '1803-11-22',
+        limit: 1,
+      });
+      const value = output(result);
+      expect(value.items![0]).toMatchObject({
+        memberId: null,
+        sourceMemberId: String(MemberId),
+        memberName: 'Synthetic speaker',
+        attributedTo: '  Attribution  ',
+        text: ' <p>Complete 1 &amp; source\n"文🏛️"</p> ',
+        preview: 'Preview only…',
+        source: {
+          url: requests[0]!.href,
+          retrievedAt: expect.any(String),
+          licenceUrl: expect.any(String),
+        },
+      });
+      expect(value.page).toMatchObject({
+        returned: 1,
+        total: 2,
+        hasMore: true,
+        nextCursor: expect.any(String),
+      });
+      expect(text(result)).toContain('sourceMemberId');
+    },
+  );
+
+  it.each([42, '42', null, undefined])(
+    'keeps nonsentinel speaker identity %j distinct without duplicate metadata',
+    async (MemberId) => {
+      installHansard(() => spoken([{ ...contribution(), MemberId }]));
+      const value = output(await runToolContract(ukparlSearchHansard, {}));
+      expect(value.items![0]!.memberId).toBe(MemberId == null ? MemberId : '42');
+      expect(value.items![0]).not.toHaveProperty('sourceMemberId');
+    },
+  );
+
+  it.each([
+    { ItemId: -1 },
+    { DebateSectionId: -1 },
+    { ItemId: '-1' },
+    { DebateSectionId: '-1' },
+    { MemberId: -1.5 },
+    { MemberId: Number.MIN_SAFE_INTEGER - 1 },
+  ])(
+    'rejects malformed source identifiers %j without widening other namespaces',
+    async (changes) => {
+      installHansard(() => spoken([{ ...contribution(), ...changes }]));
+      const result = await runToolContract(ukparlSearchHansard, {});
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: { code: JsonRpcErrorCode.ValidationError },
+      });
+      expect(text(result)).toContain('Parliament JSON did not match');
+    },
+  );
+
+  it.each([
+    { memberId: '-1' },
+    { memberId: '0' },
+    { debateSectionId: '-1' },
+    { debateSectionId: '0' },
+  ])('rejects nonpositive input joins %j before network I/O', async (input) => {
+    const requests = installHansard(() => spoken([]));
+    const result = await runToolContract(ukparlSearchHansard, input);
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.InvalidParams },
+    });
+    expect(requests).toEqual([]);
+  });
   it.each(['House of Commons', ' LORDS '])(
     'uses the exact Spoken route and query allowlist for %s',
     async (house) => {

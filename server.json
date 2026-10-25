@@ -62,6 +62,12 @@
           "default": "/mcp"
         },
         {
+          "name": "MCP_PUBLIC_URL",
+          "description": "Public origin override for deployments behind a TLS-terminating reverse proxy (e.g. https://mcp.example.com).",
+          "format": "string",
+          "isRequired": false
+        },
+        {
           "name": "MCP_AUTH_MODE",
           "description": "Authentication mode to use: 'none', 'jwt', or 'oauth'.",
           "format": "string",

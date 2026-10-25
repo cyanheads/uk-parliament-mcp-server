@@ -26,7 +26,10 @@ export interface QuestionsSearch {
 }
 /** Source adapters reuse the caller-owned deadline, including reference validation. */
 export class QuestionsService {
-  constructor(private readonly http: ParliamentHttpService) {}
+  private readonly http: ParliamentHttpService;
+  constructor(http: ParliamentHttpService) {
+    this.http = http;
+  }
 
   /** Validate against the complete Members answering-body reference before searching. */
   async search(call: ParliamentCall, input: QuestionsSearch, offset: number, take: number) {

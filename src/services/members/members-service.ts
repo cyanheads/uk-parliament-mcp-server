@@ -33,18 +33,12 @@ export interface MemberSearch {
   name?: string | undefined;
   partyId?: string | undefined;
 }
-/** Selected member subsection; role categories are selected locally from one biography fetch. */
-export type MemberSection =
-  | 'profile'
-  | 'roles'
-  | 'committee_seats'
-  | 'contact'
-  | 'interests'
-  | 'voting';
-
 /** Source-only adapters: no personal-data cache and no automatic cross-section hydration. */
 export class MembersService {
-  constructor(private readonly http: ParliamentHttpService) {}
+  private readonly http: ParliamentHttpService;
+  constructor(http: ParliamentHttpService) {
+    this.http = http;
+  }
 
   /** Search omits IsCurrentMember entirely for the all-members selection. */
   search(call: ParliamentCall, input: MemberSearch, offset: number, take: number) {

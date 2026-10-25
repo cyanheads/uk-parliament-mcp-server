@@ -54,7 +54,13 @@ function normalize(raw: z.infer<typeof RawHansardItemSchema>, source: Source) {
   return HansardItemSchema.parse({
     itemId: String(ItemId),
     contributionExtId: ContributionExtId,
-    ...(MemberId !== undefined ? { memberId: MemberId === null ? null : String(MemberId) } : {}),
+    ...(MemberId !== undefined
+      ? MemberId === null
+        ? { memberId: null }
+        : Number(MemberId) <= 0
+          ? { memberId: null, sourceMemberId: String(MemberId) }
+          : { memberId: String(MemberId) }
+      : {}),
     ...(DebateSectionId !== undefined
       ? { debateSectionId: DebateSectionId === null ? null : String(DebateSectionId) }
       : {}),

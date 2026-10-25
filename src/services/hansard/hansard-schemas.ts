@@ -39,11 +39,15 @@ const RawIdSchema = z.union([
   z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
   z.string().regex(/^[0-9]+$/),
 ]);
+const RawMemberIdSchema = z.union([
+  z.number().int().min(-2147483648).max(Number.MAX_SAFE_INTEGER),
+  z.string().regex(/^-?[0-9]+$/),
+]);
 const nullableText = z.string().nullish();
 /** Raw SearchReferencesItem, including nullable procedural and historical speakers. */
 export const RawHansardItemSchema = z.object({
   MemberName: nullableText,
-  MemberId: RawIdSchema.nullish(),
+  MemberId: RawMemberIdSchema.nullish(),
   AttributedTo: nullableText,
   ItemId: RawIdSchema,
   ContributionExtId: z.string().min(1),
@@ -85,7 +89,17 @@ export const HansardItemSchema = z.object({
     .nullable()
     .optional()
     .describe('Source speaker name; null includes procedural records.'),
-  memberId: z.string().nullable().optional().describe('Members API join identifier when supplied.'),
+  memberId: z
+    .string()
+    .nullable()
+    .optional()
+    .describe(
+      'Positive Members API join identifier; null for source null or nonpositive sentinels.',
+    ),
+  sourceMemberId: z
+    .string()
+    .optional()
+    .describe('Original nonpositive source MemberId sentinel; not a Members API join identifier.'),
   attributedTo: z
     .string()
     .nullable()

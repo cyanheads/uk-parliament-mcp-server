@@ -57,11 +57,18 @@
     "ai-agents",
     "ai-tools",
     "typescript",
+    "bun",
+    "stdio",
+    "streamable-http",
     "cyanheads",
     "uk-parliament",
     "hansard",
     "legislation",
-    "politics"
+    "politics",
+    "westminster",
+    "written-questions",
+    "committees",
+    "parliamentary-votes"
   ],
   "repository": {
     "type": "git",

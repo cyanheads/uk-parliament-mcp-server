@@ -257,7 +257,10 @@ function normalizeLords(
 
 /** Stateless source service; transport owns initialization, deadlines, retries and teardown. */
 export class DivisionsService {
-  constructor(private readonly http: ParliamentHttpService) {}
+  private readonly http: ParliamentHttpService;
+  constructor(http: ParliamentHttpService) {
+    this.http = http;
+  }
 
   /** Fetch one selected source only; a true 404 becomes a typed not-found payload. */
   async execute(input: DivisionSelection, call: ParliamentCall) {

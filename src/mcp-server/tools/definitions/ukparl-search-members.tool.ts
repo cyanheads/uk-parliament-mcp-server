@@ -89,7 +89,9 @@ export const ukparlSearchMembers = tool('ukparl_search_members', {
     cursor: optionalText(z.string().min(1)).describe(
       'Opaque collection cursor for the same filters.',
     ),
-    limit: LimitSchema.describe('Requested whole members; default 10, cap 20, maximum input 1000.'),
+    limit: LimitSchema.describe(
+      'Requested whole members; default 10, cap 20; safe over-cap integers are clamped.',
+    ),
     contentCursor: optionalText(z.string().min(1)).describe(
       'Same-selection lossless content continuation.',
     ),
@@ -224,7 +226,7 @@ export const ukparlSearchMembers = tool('ukparl_search_members', {
       asOf: input.asOf,
     };
     const applied = { mode, source: 'members' as const, limit, filters: '/query' as const };
-    const notice = `${LICENCE_NOTICE} ${input.asOf ? 'Historical membership search; latest profile fields are source metadata and may contain null values.' : 'No implicit membership-date restriction; currentOnly=false omits IsCurrentMember.'}${input.limit > 20 ? ` Requested limit ${input.limit} is capped at 20.` : ''}`;
+    const notice = `${LICENCE_NOTICE} ${input.asOf ? 'Historical membership search; latest profile fields are source metadata and may contain null values.' : 'No implicit membership-date restriction; currentOnly=false includes current and former members.'}${input.limit > 20 ? ` Requested limit ${input.limit} is capped at 20.` : ''}`;
     const enrichment = {
       applied,
       notice,

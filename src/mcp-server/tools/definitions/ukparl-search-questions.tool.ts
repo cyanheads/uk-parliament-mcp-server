@@ -17,6 +17,7 @@ import {
 } from '@/services/parliament-http/parliament-delivery.js';
 import { getParliamentHttp } from '@/services/parliament-http/parliament-http-service.js';
 import {
+  DateShapeSchema,
   HouseSchema,
   IdSchema,
   LICENCE_NOTICE,
@@ -115,14 +116,18 @@ export const ukparlSearchQuestions = tool('ukparl_search_questions', {
       .boolean()
       .optional()
       .describe('True answered, false unanswered, omission either; search only.'),
-    tabledFrom: optionalText(z.string()).describe(
+    tabledFrom: optionalText(DateShapeSchema).describe(
       'Inclusive tabling start YYYY-MM-DD; search only.',
     ),
-    tabledTo: optionalText(z.string()).describe('Inclusive tabling end YYYY-MM-DD; search only.'),
-    answeredFrom: optionalText(z.string()).describe(
+    tabledTo: optionalText(DateShapeSchema).describe(
+      'Inclusive tabling end YYYY-MM-DD; search only.',
+    ),
+    answeredFrom: optionalText(DateShapeSchema).describe(
       'Inclusive answer start YYYY-MM-DD; search only.',
     ),
-    answeredTo: optionalText(z.string()).describe('Inclusive answer end YYYY-MM-DD; search only.'),
+    answeredTo: optionalText(DateShapeSchema).describe(
+      'Inclusive answer end YYYY-MM-DD; search only.',
+    ),
     cursor: optionalText(z.string().min(1)).describe(
       'Opaque search continuation; repeat unchanged filters.',
     ),

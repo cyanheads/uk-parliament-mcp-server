@@ -18,6 +18,7 @@ import {
 } from '@/services/parliament-http/parliament-delivery.js';
 import { getParliamentHttp } from '@/services/parliament-http/parliament-http-service.js';
 import {
+  DateShapeSchema,
   HouseSchema,
   IdSchema,
   LICENCE_NOTICE,
@@ -43,10 +44,10 @@ export const ukparlSearchHansard = tool('ukparl_search_hansard', {
     house: optionalText(HouseSchema).describe(
       'Commons or Lords; exact official House aliases are accepted.',
     ),
-    startDate: optionalText(z.string()).describe(
+    startDate: optionalText(DateShapeSchema).describe(
       'Inclusive earliest sitting date, real YYYY-MM-DD; no inferred archive cutoff.',
     ),
-    endDate: optionalText(z.string()).describe(
+    endDate: optionalText(DateShapeSchema).describe(
       'Inclusive latest sitting date, real YYYY-MM-DD; must not precede startDate.',
     ),
     debateSectionId: optionalText(IdSchema).describe(

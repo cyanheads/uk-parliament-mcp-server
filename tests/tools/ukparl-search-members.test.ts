@@ -29,6 +29,37 @@ afterEach(() => {
   disposeParliamentHttp();
 });
 describe('ukparl_search_members', () => {
+  it('accepts modern string resultType metadata and preserves member discovery on both surfaces', async () => {
+    const requests = installMembers(() => ({
+      ...page([member()]),
+      resultType: 'MemberName, House',
+    }));
+    const result = await runToolContract(ukparlSearchMembers, {
+      name: 'Synthetic',
+      house: 'commons',
+    });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      mode: 'search',
+      items: [
+        { memberId: '77', nameDisplayAs: 'Synthetic Member', source: { url: requests[0]!.href } },
+      ],
+      page: { returned: 1, total: 1, hasMore: false },
+    });
+    for (const value of ['Synthetic Member', '77', requests[0]!.href, 'retrievedAt', 'licenceUrl'])
+      expect(text(result)).toContain(value);
+  });
+
+  it('still rejects malformed member records in a modern string resultType wrapper', async () => {
+    installMembers(() => ({
+      ...page([{ id: 'invalid', nameDisplayAs: 'Malformed' }]),
+      resultType: 'MemberName, House',
+    }));
+    const result = await runToolContract(ukparlSearchMembers, {});
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({ error: { code: -32007 } });
+    expect(text(result)).toContain('Parliament JSON did not match');
+  });
   it('renders queue saturation with exact-tool recovery on both surfaces', async () => {
     await withFullMembersQueue(async () => {
       const result = await runToolContract(ukparlSearchMembers, {});

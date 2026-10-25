@@ -48,157 +48,29 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 
 ## Patterns
 
-### Tool
+### Tool boundaries
 
-```ts
-import { tool, z } from '@cyanheads/mcp-ts-core';
+Read `src/mcp-server/tools/definitions/ukparl-search-bills.tool.ts` for summary discovery and `ukparl-get-member.tool.ts` for section selection. All nine tools are read-only, idempotent, and open-world. No resources or prompts are registered.
 
-export const searchItems = tool('search_items', {
-  description: 'Search inventory items by query.',
-  annotations: { readOnlyHint: true },
-  input: z.object({
-    query: z.string().describe('Search terms'),
-    limit: z.number().int().min(1).max(100).default(10).describe('Max results (1–100)'),
-  }),
-  output: z.object({
-    items: z.array(z.object({
-      id: z.string().describe('Item ID'),
-      name: z.string().describe('Item name'),
-    })).describe('Matching items'),
-  }),
-  auth: ['inventory:read'],
+- Validate mode/section combinations before I/O; never silently drop an incompatible filter. Resolve filter IDs through `ukparl_lookup_reference`.
+- Start a disposable call with `using call = getParliamentHttp().beginCall(ctx)`; share it across every related request so cancellation and the 45-second deadline cover the entire operation.
+- Pass validated source records to `deliverPayload`, including the actual collection `repage` function, same-selection `contentCursor`, retained provenance, and `enrichmentFor` / `applyEnrichment`.
+- Render through `formatData` and `enrichmentField`. Whole records paginate before an indivisible record uses `delivery: outline|fragment`; both MCP surfaces retain the same values, including source HTML and missing/null states.
 
-  async handler(input, ctx) {
-    const items = await findItems(input.query, input.limit);
-    ctx.log.info('Search completed', { query: input.query, count: items.length });
-    return { items };
-  },
+### Sources and identifiers
 
-  // format() populates content[] — the markdown twin of structuredContent.
-  // Different clients read different surfaces (Claude Code → structuredContent,
-  // Claude Desktop → content[]); both must carry the same data.
-  // Enforced at lint time: every field in `output` must appear in the rendered text.
-  format: (result) => [{
-    type: 'text',
-    text: result.items.map(i => `**${i.id}**: ${i.name}`).join('\n'),
-  }],
-});
-```
+Seven official API origins are fixed in `src/services/parliament-http/parliament-http-service.ts`. Requests are HTTPS GETs with verified relative routes and query allowlists; published links remain output data, never request targets. No server-specific environment variables, API keys, persisted corpus, or personal-data cache are used.
 
-### Resource
+Keep bill-specific stage occurrences distinct from reference stage IDs, division IDs scoped to their House, question IDs distinct from UINs, and committee person IDs distinct from Members API join keys. Search records are summaries. Only supplied authoritative legislation.gov.uk links establish a statute handoff. Preserve source coverage caveats, especially Hansard's incomplete historical coverage.
 
-```ts
-import { resource, z } from '@cyanheads/mcp-ts-core';
-import { notFound } from '@cyanheads/mcp-ts-core/errors';
+### Context used here
 
-export const itemData = resource('inventory://{itemId}', {
-  description: 'Fetch an inventory item by ID.',
-  params: z.object({ itemId: z.string().describe('Item identifier') }),
-  auth: ['inventory:read'],
-  async handler(params, ctx) {
-    const item = await ctx.state.get(`item/${params.itemId}`);
-    if (!item) throw notFound(`Item ${params.itemId} not found`, { itemId: params.itemId });
-    return item;
-  },
-});
-```
-
-### Prompt
-
-```ts
-import { prompt, z } from '@cyanheads/mcp-ts-core';
-
-export const reviewCode = prompt('review_code', {
-  description: 'Review code for issues and best practices.',
-  args: z.object({
-    code: z.string().describe('Code to review'),
-    language: z.string().optional().describe('Programming language'),
-  }),
-  generate: (args) => [
-    { role: 'user', content: { type: 'text', text: `Review this ${args.language ?? ''} code:\n${args.code}` } },
-  ],
-});
-```
-
-### Server config
-
-```ts
-// src/config/server-config.ts — lazy-parsed, separate from framework config
-import { z } from '@cyanheads/mcp-ts-core';
-import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
-
-const ServerConfigSchema = z.object({
-  apiKey: z.string().describe('External API key'),
-  maxResults: z.coerce.number().default(100),
-  verboseLogging: z.stringbool().default(false).describe('Enable verbose logging'),
-});
-
-let _config: z.infer<typeof ServerConfigSchema> | undefined;
-export function getServerConfig() {
-  _config ??= parseEnvConfig(ServerConfigSchema, {
-    apiKey: 'MY_API_KEY',
-    maxResults: 'MY_MAX_RESULTS',
-    verboseLogging: 'MY_VERBOSE_LOGGING',
-  });
-  return _config;
-}
-```
-
-`parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`MY_API_KEY`) not the path (`apiKey`). Throws `ConfigurationError`, which the framework prints as a clean startup banner.
-
-For env booleans use `z.stringbool()`, never `z.coerce.boolean()` — `Boolean("false")` is `true`, so a coerced flag can't be disabled through the environment. `z.stringbool()` parses `true/false/1/0/yes/no/on/off` and rejects anything else, so `=false` actually disables.
-
-### Server identity and instructions
-
-`createApp()` accepts optional identity fields forwarded to the SDK's `initialize` response and the server manifest (`/.well-known/mcp.json`):
-
-```ts
-await createApp({
-  name: 'my-mcp-server',
-  title: 'my-mcp-server',                     // display name matches the repository
-  websiteUrl: 'https://github.com/owner/repo', // canonical homepage URL
-  description: 'One-line description.',        // wins over MCP_SERVER_DESCRIPTION
-  icons: [{ src: 'https://example.com/icon.png', sizes: ['48x48'], mimeType: 'image/png' }],
-  instructions: 'Use shortcut alpha for the most common case.', // session-level context
-});
-```
-
-`instructions` is optional server-level orientation, sent on every `initialize` as session-level context. Use it for deployment guidance (connection aliases, regional notes, scope hints) instead of repeating the same context across tool descriptions. Client adoption is uneven, but there's no downside when set.
-
-### Session posture and shutdown
-
-Two more `createApp()` options shape how the server runs rather than how it presents itself:
-
-```ts
-await createApp({
-  sessionMode: 'stateless',          // or { default: 'stateful', require: 'stateful' }
-  setup(core) { startMyWatcher(core.config); },
-  async teardown() { await stopMyWatcher(); },
-});
-```
-
-`sessionMode` declares the HTTP session posture in `src/` instead of leaving it to a deployment's `MCP_SESSION_MODE`, which still wins whenever it carries a meaningful value (an empty string and an unsubstituted `${…}` placeholder read as unset and fall through to the option). Add `require: 'stateful'` when a tool asks the caller for input mid-handler via `ctx.requestInput`: startup then fails with a `ConfigurationError` rather than serving a mode in which a 2025-era client can never answer the prompt. Stdio is never refused.
-
-`teardown(core)` is the `setup()` counterpart — release a watcher, socket, or non-`unref()`'d timer there. It runs after the transport stops and before the logger closes, on every shutdown path, and a signal-triggered shutdown then exits the process explicitly (0, or 1 if a step never settles within the framework's 10 s ceiling).
-
----
-
-## Context
-
-Handlers receive a unified `ctx` object. Key properties:
-
-| Property | Description |
-|:---------|:------------|
-| `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. Dual-sink: Pino **and** `notifications/message` to the client, so treat it as client-visible. |
-| `ctx.state` | Tenant-scoped KV — `.get(key)`, `.set(key, value, { ttl? })`, `.delete(key)`, `.getMany(keys)`, `.list(prefix, { cursor, limit })`. Accepts any JSON-serializable value; reads return its JSON form (a `Date` comes back as an ISO string). |
-| `ctx.requestInput` | Suspend and ask the caller for more input — `return ctx.requestInput({ inputRequests: { key: inputRequired.elicit({ message, requestedSchema }) } })`. Never returns; the handler is re-entered with the answers. Always present. |
-| `ctx.inputs` | The request's responses — `.accepted(key, schema)`, `.view(key)`, `.state()`, `.dropped` — limited to what the client declared (`elicitation` and its form/url modes, `sampling`, `roots`). Client-supplied: a consent gate trusts only a `ctx.state` record it stored when it asked, bound to the operation, caller, and target (see the `api-context` skill). |
-| `ctx.clientCapabilities` | What the client declared for this request, `undefined` when no view exists. Decides whether to ask for optional context (e.g. roots); never a reason to skip a consent prompt. |
-| `ctx.enrich` | Success-path agent context (empty-result notices, query echo, pagination totals) — `ctx.enrich(...)` or `.notice()` / `.total()` / `.echo()` / `.truncated()`. Reaches `structuredContent` and `content[]`; lands only when the definition declares an `enrichment` block (no-op otherwise). |
-| `ctx.content` | Non-text content blocks — `.image(data, mimeType)`, `.audio(data, mimeType)`, or `ctx.content(block)` for a raw block. Prepended to `content[]` after `format()`; never enters `structuredContent`. |
-| `ctx.signal` | `AbortSignal` for cancellation. |
-| `ctx.requestId` | Request ID — the one every log record of the call carries and its error envelope returns as `data.requestId`. |
-| `ctx.tenantId` | Tenant ID from JWT; `'default'` for stdio or HTTP with auth off. |
+| API | Purpose |
+|:---|:---|
+| `ctx.signal` | Caller cancellation reaches the shared transport and every queued request. |
+| `ctx.enrich` | Effective selections, licence notices, coverage, and actual pagination counts, declared by each tool's enrichment schema. |
+| `ctx.fail` | Typed mode, identifier, date, and continuation failures with declared recovery guidance. |
+| `ctx.log` | Request context passed to the framework's HTTP and retry utilities. |
 
 ---
 
@@ -250,20 +122,16 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 
 ```text
 src/
-  index.ts                              # createApp() entry point
-  config/
-    server-config.ts                    # Server-specific env vars (Zod schema)
+  index.ts                             # Nine tools; stateless HTTP default
+  mcp-server/tools/definitions/         # ukparl-*.tool.ts
   services/
-    [domain]/
-      [domain]-service.ts               # Domain service (init/accessor pattern)
-      types.ts                          # Domain types
-  mcp-server/
-    tools/definitions/
-      [tool-name].tool.ts               # Tool definitions
-    resources/definitions/
-      [resource-name].resource.ts       # Resource definitions
-    prompts/definitions/
-      [prompt-name].prompt.ts           # Prompt definitions
+    parliament-http/                   # Fixed origins, queues, cursors, delivery
+    bills/                             # Bills and scrutiny records
+    members/                           # Member metadata and histories
+    divisions/                         # House-scoped votes and rosters
+    hansard/                           # Spoken contributions and coverage
+    questions/                         # Written questions and answers
+    committees/                        # Committee business and evidence metadata
 ```
 
 ---
@@ -411,7 +279,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { McpError, JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 
 // Server's own code — via path alias
-import { getMyService } from '@/services/my-domain/my-service.js';
+import { getParliamentHttp } from '@/services/parliament-http/parliament-http-service.js';
 ```
 
 ---
@@ -427,9 +295,11 @@ import { getMyService } from '@/services/my-domain/my-service.js';
 - [ ] If wrapping external API: raw/domain/output schemas reviewed against real upstream sparsity/nullability before finalizing required vs optional fields
 - [ ] If wrapping external API: normalization and `format()` preserve uncertainty; do not fabricate facts from missing upstream data
 - [ ] If wrapping external API: tests include at least one sparse payload case with omitted upstream fields
-- [ ] Registered in `createApp()` arrays (directly or via barrel exports)
+- [ ] Registered directly in the `createApp()` tools array; nine tools, no resources or prompts
 - [ ] Tests use `createMockContext()` from `@cyanheads/mcp-ts-core/testing`
 - [ ] `.codex-plugin/plugin.json` populated — `name`, `version`, `description`, `repository`, `license` from `package.json`; `interface.displayName` = the unscoped repo name (never the npm scope — `lint:packaging` enforces this); `interface.shortDescription` from `package.json` description
 - [ ] `.codex-plugin/mcp.json` updated — server name key is the unscoped repo name; every user-supplied variable (API key, contact email, instance URL) is listed in `env_vars` so Codex forwards it from the user's environment. Never write `"KEY": ""` into `env` — an empty value replaces the user's exported key and is read as unset
 - [ ] `.claude-plugin/plugin.json` populated — `name`, `version`, `description`, `author`, `repository`, `license`, `keywords` from `package.json`; inline `mcpServers` entry keyed by the unscoped repo name. Every user-supplied variable is declared under `userConfig` (`type`, `title`, `description`; `sensitive: true` for keys and tokens; `required: true` or `default: ""`) and referenced from `env` as `"KEY": "${user_config.<option>}"` — mirror the `user_config` block in `manifest.json`. Never write `"KEY": ""` into `env`
-- [ ] `npm run devcheck` passes
+- [ ] Whole-record and recursive content continuations preserve every selected source value and both MCP surfaces
+- [ ] Identifier namespaces, explicit House/date scope, and Open Parliament Licence exclusions remain accurate
+- [ ] `bun run devcheck` and `bun run test` pass

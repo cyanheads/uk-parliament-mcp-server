@@ -204,6 +204,56 @@ describe('ukparl_lookup_reference static guides', () => {
 });
 
 describe('ukparl_lookup_reference live directories', () => {
+  it('delivers a many-backtick filter through bounded continuation on both surfaces', async () => {
+    expect(process.release.name).toBe('node');
+    const nameContains = '`a'.repeat(150000);
+    const requests = installReference(() => []);
+    const input = { topic: 'departments', nameContains } as const;
+    const run = async (contentCursor?: string) => {
+      const result = await runToolContract(ukparlLookupReference, { ...input, contentCursor });
+      expect(result.isError).not.toBe(true);
+      expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(24000);
+      const encoded = [...text(result).matchAll(/(`{3,})json\n([^\n]*)\n\1/g)].map((match) =>
+        JSON.parse(match[2]!),
+      );
+      const visit = (value: unknown): void => {
+        if (value !== null && typeof value === 'object')
+          for (const child of Object.values(value)) visit(child);
+        else expect(encoded).toContainEqual(value);
+      };
+      visit(result.structuredContent);
+      const output = ukparlLookupReference.output.parse(result.structuredContent);
+      expect(output.provenance).toMatchObject({
+        api: 'members',
+        url: 'https://members-api.parliament.uk/api/Reference/Departments',
+        licenceUrl: LICENCE_URL,
+      });
+      expect(output.collectionPage).toEqual({ returned: 0, total: 0, hasMore: false });
+      return output;
+    };
+    const first = await run();
+    expect(first.delivery).toBe('outline');
+    const entry = first.contentPage!.entries!.find((item) => item.path === '/nameContains');
+    expect(entry).toMatchObject({ valueType: 'string', sizeBytes: 300002 });
+    const fragment = (await run(entry!.contentCursor)).contentPage!;
+    expect(fragment).toMatchObject({
+      path: '/nameContains',
+      encoding: 'json',
+      offset: 0,
+      totalCodeUnits: 300002,
+      hasMore: true,
+      fragment: JSON.stringify(nameContains).slice(0, 2000),
+    });
+    const next = (await run(fragment.nextCursor!)).contentPage!;
+    expect(next).toMatchObject({
+      offset: 2000,
+      totalCodeUnits: 300002,
+      hasMore: true,
+      fragment: JSON.stringify(nameContains).slice(2000, 4000),
+    });
+    expect(requests).toHaveLength(3);
+  });
+
   it('canonicalizes numeric reference IDs while preserving repeated source rows', async () => {
     installReference(() => [
       { id: 7, name: 'Synthetic repeat' },

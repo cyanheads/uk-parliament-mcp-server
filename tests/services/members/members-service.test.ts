@@ -16,6 +16,40 @@ afterEach(() => {
   disposeParliamentHttp();
 });
 describe('MembersService network adapters', () => {
+  it('keeps historical, voting and active-party wrapper metadata compatible', async () => {
+    const requests = installMembers((url) => ({
+      ...page([
+        url.pathname.includes('Voting')
+          ? { id: 8, inAffirmativeLobby: true }
+          : url.pathname.includes('GetActive')
+            ? { id: 3, name: 'Synthetic party' }
+            : member(),
+      ]),
+      resultType: url.pathname.includes('Voting') ? 0 : null,
+    }));
+    using call = getParliamentHttp().beginCall(createMockContext());
+    expect(
+      (await getMembers().search(call, { currentOnly: false, asOf: '2001-01-01' }, 0, 10)).data
+        .items![0]!.value,
+    ).toEqual({
+      id: 77,
+      nameDisplayAs: 'Synthetic Member',
+      latestParty: null,
+      latestHouseMembership: null,
+    });
+    expect(
+      (await getMembers().voting(call, '77', 'commons', 1)).data.items![0]!.value,
+    ).toMatchObject({ id: 8, inAffirmativeLobby: true });
+    expect(await getMembers().parties(call, 'commons')).toMatchObject({
+      total: 1,
+      items: [{ value: { id: 3 } }],
+    });
+    expect(requests.map((url) => url.pathname)).toEqual([
+      '/api/Members/SearchHistorical',
+      '/api/Members/77/Voting',
+      '/api/Parties/GetActive/1',
+    ]);
+  });
   it('omits unrestricted membership status, sets true explicitly, and uses the historical route', async () => {
     const requests = installMembers(() => page([member()]));
     using call = getParliamentHttp().beginCall(createMockContext());

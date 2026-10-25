@@ -225,7 +225,6 @@ export function memberSearchSchema<T extends z.ZodType>(value: T) {
     skip: integer,
     take: integer,
     resultContext: text,
-    resultType: integer,
     links: z
       .array(MemberLinkSchema)
       .nullish()

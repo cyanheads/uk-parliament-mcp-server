@@ -2,6 +2,7 @@
  * @fileoverview Written-question contracts on both MCP consumption surfaces.
  * @module tests/tools/ukparl-search-questions.test
  */
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -40,6 +41,41 @@ afterEach(() => {
 });
 
 describe('ukparl_search_questions', () => {
+  it.each(['tabledFrom', 'tabledTo', 'answeredFrom', 'answeredTo'])(
+    'advertises the YYYY-MM-DD pattern for %s',
+    (field) => {
+      const schema = z.toJSONSchema(ukparlSearchQuestions.input, {
+        io: 'input',
+        target: 'draft-2020-12',
+      });
+      expect(schema.properties?.[field]).toMatchObject({
+        type: 'string',
+        pattern: '^\\d{4}-\\d{2}-\\d{2}$',
+      });
+    },
+  );
+
+  it.each(['tabledFrom', 'tabledTo', 'answeredFrom', 'answeredTo'])(
+    'rejects syntactically invalid %s in input validation before I/O',
+    async (field) => {
+      const { requests } = installQuestions(() => page([]));
+      const result = await run({ [field]: '2026-1-01' });
+      expect(result.structuredContent).toMatchObject({
+        error: { code: JsonRpcErrorCode.InvalidParams, data: { issues: expect.any(Array) } },
+      });
+      expect(text(result)).toContain(field);
+      expect(requests).toEqual([]);
+    },
+  );
+  it('rejects a natural-language date in input validation on both surfaces before I/O', async () => {
+    const { requests } = installQuestions(() => page([]));
+    const result = await run({ tabledTo: 'yesterday' });
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.InvalidParams, data: { issues: expect.any(Array) } },
+    });
+    expect(text(result)).toContain('tabledTo');
+    expect(requests).toEqual([]);
+  });
   it('returns explicit summary previews without detail hydration and echoes normalized filters', async () => {
     const preview = {
       ...question(),
@@ -139,20 +175,19 @@ describe('ukparl_search_questions', () => {
     expect(text(result)).toContain('identifiers');
     expect(requests).toEqual([]);
   });
-  it.each([
-    { tabledFrom: '2026-02-30' },
-    { answeredFrom: '2026-03-01', answeredTo: '2026-02-01' },
-    { tabledTo: 'yesterday' },
-  ])('rejects invalid dates %j before I/O', async (input) => {
-    const { requests } = installQuestions(() => page([]));
-    const result = await run(input);
-    expect(result.structuredContent).toMatchObject({
-      error: { data: { reason: 'invalid_date_range' } },
-    });
-    expect(text(result)).toContain('coverage');
-    expect(text(result)).toContain('ordered calendar dates');
-    expect(requests).toEqual([]);
-  });
+  it.each([{ tabledFrom: '2026-02-30' }, { answeredFrom: '2026-03-01', answeredTo: '2026-02-01' }])(
+    'rejects invalid dates %j before I/O',
+    async (input) => {
+      const { requests } = installQuestions(() => page([]));
+      const result = await run(input);
+      expect(result.structuredContent).toMatchObject({
+        error: { data: { reason: 'invalid_date_range' } },
+      });
+      expect(text(result)).toContain('coverage');
+      expect(text(result)).toContain('ordered calendar dates');
+      expect(requests).toEqual([]);
+    },
+  );
   it('normalizes blank form fields and safely caps the largest accepted integer', async () => {
     const { requests } = installQuestions(() => page([]));
     const result = await run({
