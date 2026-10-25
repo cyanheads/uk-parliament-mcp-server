@@ -1,6 +1,6 @@
 # uk-parliament-mcp-server - Directory Structure
 
-Generated on: 2026-10-25 13:14:52
+Generated on: 2026-10-25 13:36:27
 
 ```text
 uk-parliament-mcp-server/
@@ -24,6 +24,7 @@ uk-parliament-mcp-server/
 │   ├── extensions.json
 │   └── settings.json
 ├── changelog/
+│   ├── 0.1.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
@@ -225,6 +226,7 @@ uk-parliament-mcp-server/
 ├── biome.json
 ├── bun.lock
 ├── bunfig.toml
+├── CHANGELOG.md
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile
