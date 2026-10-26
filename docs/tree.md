@@ -1,6 +1,6 @@
 # uk-parliament-mcp-server - Directory Structure
 
-Generated on: 2026-10-25 13:36:27
+Generated on: 2026-10-26 03:37:14
 
 ```text
 uk-parliament-mcp-server/
@@ -36,6 +36,8 @@ uk-parliament-mcp-server/
 │   ├── add-resource/
 │   │   └── SKILL.md
 │   ├── add-service/
+│   │   └── SKILL.md
+│   ├── add-skill/
 │   │   └── SKILL.md
 │   ├── add-test/
 │   │   └── SKILL.md
@@ -182,6 +184,8 @@ uk-parliament-mcp-server/
 │   │   └── parliament-registration.int.test.ts
 │   ├── prompts/
 │   ├── resources/
+│   ├── scripts/
+│   │   └── clean-mcpb.test.ts
 │   ├── services/
 │   │   ├── bills/
 │   │   │   ├── bills-fixtures.ts
@@ -208,6 +212,8 @@ uk-parliament-mcp-server/
 │   │       └── questions-service.test.ts
 │   ├── smoke/
 │   └── tools/
+│       ├── rendered-payload.test.ts
+│       ├── rendered-payload.ts
 │       ├── ukparl-get-bill.test.ts
 │       ├── ukparl-get-committee.test.ts
 │       ├── ukparl-get-member.test.ts
@@ -232,7 +238,9 @@ uk-parliament-mcp-server/
 ├── Dockerfile
 ├── LICENSE
 ├── manifest.json
+├── mcp.json
 ├── package.json
+├── plugin.json
 ├── README.md
 ├── server.json
 ├── tsconfig.build.json
