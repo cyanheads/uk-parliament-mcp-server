@@ -5,10 +5,17 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, validationError } from '@cyanheads/mcp-ts-core/errors';
 import { CommitteeRecordSchema } from '@/services/committees/committee-models.js';
-import { CommitteeLinkSchema, getCommittees } from '@/services/committees/committees-service.js';
 import {
-  advanceCollectionCursor,
+  CommitteeBusinessSortSchema,
+  CommitteeBusinessStatusSchema,
+  CommitteeLinkSchema,
+  CommitteePublicationSortSchema,
+  CommitteeStatusSchema,
+  getCommittees,
+} from '@/services/committees/committees-service.js';
+import {
   invalidCursor,
+  pageFor,
   readCollectionCursor,
 } from '@/services/parliament-http/parliament-cursors.js';
 import {
@@ -19,12 +26,14 @@ import {
 } from '@/services/parliament-http/parliament-delivery.js';
 import { getParliamentHttp } from '@/services/parliament-http/parliament-http-service.js';
 import {
+  DateSchema,
   IdSchema,
   LICENCE_NOTICE,
   LimitSchema,
   optionalText,
   PageSchema,
   SourceSchema,
+  validateDateRange,
 } from '@/services/parliament-http/parliament-models.js';
 
 const ModeSchema = z.enum([
@@ -35,6 +44,8 @@ const ModeSchema = z.enum([
   'inquiry',
   'publications',
   'publication',
+  'evidence',
+  'evidence_detail',
 ]);
 const CommitteeHouseSchema = z.preprocess(
   (value) => {
@@ -44,7 +55,36 @@ const CommitteeHouseSchema = z.preprocess(
   },
   z.enum(['commons', 'lords', 'joint']),
 );
+const SelectionShape = {
+  status: optionalText(z.union([CommitteeStatusSchema, CommitteeBusinessStatusSchema])).describe(
+    'Search: Current|Former|All. Inquiries: Open|Closed. Omitted uses source default.',
+  ),
+  acceptingEvidence: z
+    .boolean()
+    .optional()
+    .describe(
+      'Inquiries only: true selects accepting businesses; false leaves source selection unrestricted.',
+    ),
+  openedFrom: optionalText(DateSchema).describe('Inquiries opened on/after this ISO date.'),
+  openedTo: optionalText(DateSchema).describe('Inquiries opened on/before this ISO date.'),
+  sortOrder: optionalText(
+    z.union([CommitteeBusinessSortSchema, CommitteePublicationSortSchema]),
+  ).describe(
+    'Inquiries: DateOpenedNewest|DateOpenedOldest|PublicationDateAscending|PublicationDateDescending. Publications: PublicationDateAscending|PublicationDateDescending|ResponseDateAscending|ResponseDateDescending. Omitted preserves source order.',
+  ),
+  publicationTypeIds: z
+    .preprocess(
+      (value) => (Array.isArray(value) && value.length === 0 ? undefined : value),
+      z.array(IdSchema).optional(),
+    )
+    .describe(
+      'Publications only: positive publication type IDs, serialized as repeated parameters.',
+    ),
+  publishedFrom: optionalText(DateSchema).describe('Publications starting on/after this ISO date.'),
+  publishedTo: optionalText(DateSchema).describe('Publications starting on/before this ISO date.'),
+};
 const FiltersSchema = z.object({
+  ...SelectionShape,
   query: z.string().optional().describe('Normalized source search terms.'),
   house: z
     .enum(['commons', 'lords', 'joint'])
@@ -53,6 +93,8 @@ const FiltersSchema = z.object({
   committeeId: z.string().optional().describe('Selected committee namespace ID.'),
   businessId: z.string().optional().describe('Selected committee-business namespace ID.'),
   publicationId: z.string().optional().describe('Selected publication namespace ID.'),
+  evidenceId: z.string().optional().describe('Selected evidence namespace ID.'),
+  evidenceType: z.enum(['written', 'oral']).optional().describe('Selected evidence namespace.'),
   membership: z
     .enum(['all', 'current', 'former'])
     .optional()
@@ -107,11 +149,12 @@ const OutputSchema = z.object({
 export const ukparlGetCommittee = tool('ukparl_get_committee', {
   title: 'Get committees and evidence',
   description:
-    'Find Westminster committees with mode=search, then use committeeId for detail, members, inquiries or publications. Inquiries returns every committee business type, labelled by isInquiry; use businessId with mode=inquiry for complete business detail or to filter publications. Use publicationId with mode=publication for complete evidence/report document metadata and source links. Memberships retain all role periods; personId is distinct from Members API memberId. No document downloads or text extraction. Follow cursors with unchanged filters; contentCursor retrieves oversized records losslessly. Typed entities retain sourcePath relationships to reconstruct nested source metadata.',
+    'Find Westminster committees with mode=search, then use committeeId for detail, members, inquiries or publications. Inquiries returns every committee business type, labelled by isInquiry; use businessId with mode=inquiry for complete business detail or to filter publications. Use publicationId with mode=publication for complete report/publication metadata and source links. Use mode=evidence with businessId and evidenceType=written|oral to list evidence; mode=evidence_detail requires evidenceId and evidenceType in the same namespace. Memberships retain all role periods; personId is distinct from Members API memberId. No document downloads or text extraction. Follow cursors with unchanged filters; contentCursor retrieves oversized records losslessly. Typed entities retain sourcePath relationships to reconstruct nested source metadata.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
+    ...SelectionShape,
     mode: ModeSchema.default('search').describe(
-      'Search, committee detail, members, business list/detail or publication list/detail.',
+      'Search, committee detail, members, business list/detail, publication list/detail or written/oral evidence list/detail.',
     ),
     query: optionalText(z.string().trim().min(1)).describe(
       'Search terms for search, inquiries or publications; latter two require at least two characters.',
@@ -120,13 +163,17 @@ export const ukparlGetCommittee = tool('ukparl_get_committee', {
       'Commons, Lords or Joint, case-insensitive; exact House of Commons/Lords aliases also accepted. Search only.',
     ),
     committeeId: optionalText(IdSchema).describe(
-      'Committee ID required for detail, members, inquiries and publications.',
+      'Committee ID required for detail, members and publications; optional for inquiries to discover businesses across committees.',
     ),
     businessId: optionalText(IdSchema).describe(
-      'Business ID required for inquiry; optional additional publication filter.',
+      'Business ID required for inquiry and evidence; optional additional publication filter.',
     ),
     publicationId: optionalText(IdSchema).describe(
       'Publication ID required for publication detail.',
+    ),
+    evidenceId: optionalText(IdSchema).describe('Evidence detail ID, scoped by evidenceType.'),
+    evidenceType: optionalText(z.enum(['written', 'oral'])).describe(
+      'Required for evidence list/detail; written and oral IDs are distinct.',
     ),
     membership: optionalText(z.enum(['all', 'current', 'former'])).describe(
       'Members mode only, default all; filters role-period membership status.',
@@ -165,6 +212,13 @@ export const ukparlGetCommittee = tool('ukparl_get_committee', {
     cap: { render: enrichmentField('cap') },
   },
   errors: [
+    {
+      reason: 'invalid_date_range',
+      code: JsonRpcErrorCode.InvalidParams,
+      thrownBy: 'service',
+      when: 'An opened or published date range ends before it starts.',
+      recovery: 'Repeat ukparl_get_committee with the starting date on or before the ending date.',
+    },
     {
       reason: 'http_invalid_params',
       code: JsonRpcErrorCode.InvalidParams,
@@ -253,60 +307,146 @@ export const ukparlGetCommittee = tool('ukparl_get_committee', {
   async handler(input, ctx) {
     const { mode } = input;
     const collection =
-      mode === 'search' || mode === 'members' || mode === 'inquiries' || mode === 'publications';
+      mode === 'search' ||
+      mode === 'members' ||
+      mode === 'inquiries' ||
+      mode === 'publications' ||
+      mode === 'evidence';
     const allowed: Record<z.infer<typeof ModeSchema>, readonly string[]> = {
-      search: ['query', 'house'],
+      search: ['query', 'house', 'status'],
       detail: ['committeeId'],
       members: ['committeeId', 'membership'],
-      inquiries: ['committeeId', 'query'],
+      inquiries: [
+        'committeeId',
+        'query',
+        'status',
+        'acceptingEvidence',
+        'openedFrom',
+        'openedTo',
+        'sortOrder',
+      ],
       inquiry: ['businessId'],
-      publications: ['committeeId', 'businessId', 'query'],
+      publications: [
+        'committeeId',
+        'businessId',
+        'query',
+        'sortOrder',
+        'publicationTypeIds',
+        'publishedFrom',
+        'publishedTo',
+      ],
       publication: ['publicationId'],
+      evidence: ['businessId', 'evidenceType'],
+      evidence_detail: ['evidenceId', 'evidenceType'],
     };
     const filters = FiltersSchema.parse({
+      status: input.status,
+      acceptingEvidence: input.acceptingEvidence,
+      openedFrom: input.openedFrom,
+      openedTo: input.openedTo,
+      sortOrder: input.sortOrder,
+      publicationTypeIds: input.publicationTypeIds,
+      publishedFrom: input.publishedFrom,
+      publishedTo: input.publishedTo,
       query: input.query,
       house: input.house,
       committeeId: input.committeeId,
       businessId: input.businessId,
       publicationId: input.publicationId,
+      evidenceId: input.evidenceId,
+      evidenceType: input.evidenceType,
       membership: input.membership,
     });
-    const requiredId =
-      mode === 'search'
-        ? undefined
-        : mode === 'inquiry'
-          ? input.businessId
-          : mode === 'publication'
-            ? input.publicationId
-            : input.committeeId;
-    if (
-      Object.entries(filters).some(
-        ([key, value]) => value !== undefined && !allowed[mode].includes(key),
-      ) ||
-      (mode !== 'search' && requiredId === undefined) ||
-      (!collection && (input.cursor !== undefined || input.limit !== undefined)) ||
-      ((mode === 'inquiries' || mode === 'publications') &&
-        input.query !== undefined &&
-        input.query.length < 2)
-    )
-      throw ctx.fail(
-        'invalid_mode_arguments',
-        'Supply the selected mode identifier, omit other branch arguments, and use at least two characters for business/publication queries.',
+    const requiredField =
+      mode === 'inquiry' || mode === 'evidence'
+        ? 'businessId'
+        : mode === 'publication'
+          ? 'publicationId'
+          : mode === 'evidence_detail'
+            ? 'evidenceId'
+            : 'committeeId';
+    const requiredId = mode === 'search' ? undefined : input[requiredField];
+    const discovery =
+      requiredField === 'businessId'
+        ? 'mode=inquiries'
+        : requiredField === 'publicationId'
+          ? 'mode=publications'
+          : requiredField === 'evidenceId'
+            ? 'mode=evidence with the same evidenceType'
+            : 'mode=search';
+    const missingIdMessage = `mode=${mode} requires ${requiredField}; supply ${requiredField} from ${discovery}.`;
+    const conflicts: string[] = [];
+    if (mode !== 'search' && mode !== 'inquiries' && requiredId === undefined)
+      conflicts.push(missingIdMessage);
+    if ((mode === 'evidence' || mode === 'evidence_detail') && input.evidenceType === undefined)
+      conflicts.push(
+        `mode=${mode} requires evidenceType=written or evidenceType=oral; select the evidence namespace.`,
       );
+    for (const [field, value] of Object.entries(filters)) {
+      if (value === undefined || allowed[mode].includes(field)) continue;
+      const compatible = Object.entries(allowed)
+        .filter(([, fields]) => fields.includes(field))
+        .map(([name]) => name);
+      const modes =
+        compatible.length === 1
+          ? compatible[0]
+          : `${compatible.slice(0, -1).join(', ')} or ${compatible.at(-1)}`;
+      conflicts.push(
+        `${field} is unsupported for mode=${mode}; omit ${field} or select mode=${modes}.`,
+      );
+    }
+    if (
+      mode === 'search' &&
+      input.status !== undefined &&
+      !CommitteeStatusSchema.safeParse(input.status).success
+    )
+      conflicts.push(
+        `status=${JSON.stringify(input.status)} is incompatible with mode=search; use Current, Former or All.`,
+      );
+    if (
+      mode === 'inquiries' &&
+      input.status !== undefined &&
+      !CommitteeBusinessStatusSchema.safeParse(input.status).success
+    )
+      conflicts.push(
+        `status=${JSON.stringify(input.status)} is incompatible with mode=inquiries; use Open or Closed.`,
+      );
+    if (
+      mode === 'inquiries' &&
+      input.sortOrder !== undefined &&
+      !CommitteeBusinessSortSchema.safeParse(input.sortOrder).success
+    )
+      conflicts.push(
+        `sortOrder=${JSON.stringify(input.sortOrder)} is incompatible with mode=inquiries; use DateOpenedNewest, DateOpenedOldest, PublicationDateAscending or PublicationDateDescending.`,
+      );
+    if (
+      mode === 'publications' &&
+      input.sortOrder !== undefined &&
+      !CommitteePublicationSortSchema.safeParse(input.sortOrder).success
+    )
+      conflicts.push(
+        `sortOrder=${JSON.stringify(input.sortOrder)} is incompatible with mode=publications; use PublicationDateAscending, PublicationDateDescending, ResponseDateAscending or ResponseDateDescending.`,
+      );
+    if (!collection && input.cursor !== undefined)
+      conflicts.push(`cursor is unsupported for singular mode=${mode}; omit cursor.`);
+    if (!collection && input.limit !== undefined)
+      conflicts.push(`limit is unsupported for singular mode=${mode}; omit limit.`);
+    if (
+      (mode === 'inquiries' || mode === 'publications') &&
+      input.query !== undefined &&
+      input.query.length < 2
+    )
+      conflicts.push(
+        `query in mode=${mode} requires at least 2 characters; supply a longer query or omit query.`,
+      );
+    if (conflicts.length > 0) throw ctx.fail('invalid_mode_arguments', conflicts.join(' '));
+    validateDateRange(input.openedFrom, input.openedTo);
+    validateDateRange(input.publishedFrom, input.publishedTo);
     if (mode === 'members') filters.membership = input.membership ?? 'all';
     const cap = mode === 'search' ? 20 : 50;
     const requestedLimit = input.limit ?? (mode === 'search' ? 10 : 20);
     const limit = Math.min(cap, requestedLimit);
     const selection = { mode, filters, ...(collection ? { limit, cursor: input.cursor } : {}) };
-    const cursor = collection
-      ? readCollectionCursor(input.cursor, {
-          source: 'committees',
-          selector: mode,
-          filters,
-          nativePageSize: limit,
-        })
-      : undefined;
-    if (cursor && cursor.offset > 2147483647) return invalidCursor();
     const applied = AppliedSchema.parse({
       mode,
       source: 'committees',
@@ -330,16 +470,18 @@ export const ukparlGetCommittee = tool('ukparl_get_committee', {
       notice,
       ...(collection && requestedLimit > cap ? { requestedLimit } : {}),
     };
-    using call = getParliamentHttp().beginCall(ctx);
-    const service = getCommittees();
     if (!collection) {
-      if (!requiredId) throw ctx.fail('invalid_mode_arguments');
+      using call = getParliamentHttp().beginCall(ctx);
+      const service = getCommittees();
+      if (!requiredId) throw ctx.fail('invalid_mode_arguments', missingIdMessage);
       const response =
         mode === 'detail'
           ? await service.detail(call, requiredId)
           : mode === 'inquiry'
             ? await service.inquiry(call, requiredId)
-            : await service.publication(call, requiredId);
+            : mode === 'evidence_detail' && input.evidenceType
+              ? await service.evidenceDetail(call, input.evidenceType, requiredId)
+              : await service.publication(call, requiredId);
       const payload = {
         mode,
         filters,
@@ -348,7 +490,7 @@ export const ukparlGetCommittee = tool('ukparl_get_committee', {
           ? { record: response.data, source: response.source }
           : {
               guidance:
-                'No website-visible source record matched. Repeat ukparl_get_committee in search, inquiries or publications mode to discover the correct namespace ID.',
+                'No website-visible source record matched. Repeat ukparl_get_committee in search, inquiries, publications or evidence mode to discover the correct namespace ID.',
             }),
       };
       return deliverPayload(payload, {
@@ -363,12 +505,29 @@ export const ukparlGetCommittee = tool('ukparl_get_committee', {
         applyEnrichment: (values) => ctx.enrich(values),
       });
     }
-    if (!cursor) return invalidCursor();
+    const cursor = readCollectionCursor(input.cursor, {
+      source: 'committees',
+      selector: mode,
+      filters,
+      nativePageSize: limit,
+    });
+    using call = getParliamentHttp().beginCall(ctx);
+    const service = getCommittees();
     const committeeId = input.committeeId;
-    if (mode !== 'search' && !committeeId) throw ctx.fail('invalid_mode_arguments');
+    if (mode !== 'search' && mode !== 'evidence' && mode !== 'inquiries' && !committeeId)
+      throw ctx.fail('invalid_mode_arguments', missingIdMessage);
     const response =
       mode === 'search'
-        ? await service.search(call, filters, cursor.offset, limit)
+        ? await service.search(
+            call,
+            {
+              ...filters,
+              status:
+                input.status === undefined ? undefined : CommitteeStatusSchema.parse(input.status),
+            },
+            cursor.offset,
+            limit,
+          )
         : mode === 'members' && committeeId
           ? await service.members(
               call,
@@ -377,18 +536,43 @@ export const ukparlGetCommittee = tool('ukparl_get_committee', {
               cursor.offset,
               limit,
             )
-          : mode === 'inquiries' && committeeId
-            ? await service.inquiries(call, committeeId, input.query, cursor.offset, limit)
-            : committeeId
-              ? await service.publications(
-                  call,
-                  committeeId,
-                  input.businessId,
-                  input.query,
-                  cursor.offset,
-                  limit,
-                )
-              : invalidCursor();
+          : mode === 'evidence' && input.evidenceType && input.businessId
+            ? await service.evidence(
+                call,
+                input.evidenceType,
+                input.businessId,
+                cursor.offset,
+                limit,
+              )
+            : mode === 'inquiries'
+              ? await service.inquiries(call, committeeId, input.query, cursor.offset, limit, {
+                  ...filters,
+                  status:
+                    input.status === undefined
+                      ? undefined
+                      : CommitteeBusinessStatusSchema.parse(input.status),
+                  sortOrder:
+                    input.sortOrder === undefined
+                      ? undefined
+                      : CommitteeBusinessSortSchema.parse(input.sortOrder),
+                })
+              : committeeId
+                ? await service.publications(
+                    call,
+                    committeeId,
+                    input.businessId,
+                    input.query,
+                    cursor.offset,
+                    limit,
+                    {
+                      ...filters,
+                      sortOrder:
+                        input.sortOrder === undefined
+                          ? undefined
+                          : CommitteePublicationSortSchema.parse(input.sortOrder),
+                    },
+                  )
+                : invalidCursor();
     const items = response.data.items;
     if (items.length > limit || (items.length === 0 && cursor.offset < response.data.totalResults))
       throw validationError(
@@ -404,14 +588,7 @@ export const ukparlGetCommittee = tool('ukparl_get_committee', {
         itemsState: response.data.itemsState,
       },
       items: items.slice(0, count),
-      page: {
-        returned: count,
-        total: response.data.totalResults,
-        hasMore: cursor.offset + count < response.data.totalResults,
-        ...(cursor.offset + count < response.data.totalResults
-          ? { nextCursor: advanceCollectionCursor(cursor, count) }
-          : {}),
-      },
+      page: pageFor(cursor, count, response.data.totalResults),
       ...(items.length === 0
         ? {
             guidance:

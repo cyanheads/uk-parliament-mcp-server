@@ -3,7 +3,6 @@
  * @module services/committees/committees-service
  */
 import { z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import {
   getParliamentHttp,
   type ParliamentCall,
@@ -14,14 +13,19 @@ import {
   CommitteeBusinessSummaryRawSchema,
   CommitteeDetailsRawSchema,
   CommitteeMemberRawSchema,
+  type CommitteeRecordSchema,
   CommitteeSummaryRawSchema,
   normalizeCommitteeBusinessDetails,
   normalizeCommitteeBusinessSummary,
   normalizeCommitteeDetails,
   normalizeCommitteeMember,
   normalizeCommitteeSummary,
+  normalizeOralEvidence,
   normalizePublication,
+  normalizeWrittenEvidence,
+  OralEvidenceRawSchema,
   PublicationRawSchema,
+  WrittenEvidenceRawSchema,
 } from './committee-models.js';
 
 /** Published navigation metadata; links never become request targets. */
@@ -44,6 +48,41 @@ function collectionSchema<T extends z.ZodType>(item: T) {
 export type CommitteeHouse = 'commons' | 'lords' | 'joint';
 /** Complete membership-period selector. */
 export type CommitteeMembership = 'all' | 'current' | 'former';
+/** Written and oral evidence IDs occupy distinct upstream namespaces. */
+export type EvidenceType = 'written' | 'oral';
+/** Official committee lifecycle selector. */
+export const CommitteeStatusSchema = z.enum(['Current', 'Former', 'All']);
+/** Official committee business state selector. */
+export const CommitteeBusinessStatusSchema = z.enum(['Open', 'Closed']);
+/** Official business ordering, applied by the source rather than locally. */
+export const CommitteeBusinessSortSchema = z.enum([
+  'DateOpenedNewest',
+  'DateOpenedOldest',
+  'PublicationDateAscending',
+  'PublicationDateDescending',
+]);
+/** Official publication ordering, including response-date variants. */
+export const CommitteePublicationSortSchema = z.enum([
+  'PublicationDateAscending',
+  'PublicationDateDescending',
+  'ResponseDateAscending',
+  'ResponseDateDescending',
+]);
+/** Source business filters; false acceptingEvidence leaves upstream results unrestricted. */
+export interface CommitteeBusinessFilters {
+  acceptingEvidence?: boolean | undefined;
+  openedFrom?: string | undefined;
+  openedTo?: string | undefined;
+  sortOrder?: z.infer<typeof CommitteeBusinessSortSchema> | undefined;
+  status?: z.infer<typeof CommitteeBusinessStatusSchema> | undefined;
+}
+/** Source publication filters; type IDs serialize as repeated parameters. */
+export interface CommitteePublicationFilters {
+  publicationTypeIds?: string[] | undefined;
+  publishedFrom?: string | undefined;
+  publishedTo?: string | undefined;
+  sortOrder?: z.infer<typeof CommitteePublicationSortSchema> | undefined;
+}
 /** Fixed-route adapters; no evidence documents are downloaded. */
 export class CommitteesService {
   private readonly http: ParliamentHttpService;
@@ -54,7 +93,11 @@ export class CommitteesService {
   /** Search summaries, retaining complete parent/subcommittee metadata. */
   async search(
     call: ParliamentCall,
-    input: { query?: string | undefined; house?: CommitteeHouse | undefined },
+    input: {
+      query?: string | undefined;
+      house?: CommitteeHouse | undefined;
+      status?: z.infer<typeof CommitteeStatusSchema> | undefined;
+    },
     skip: number,
     take: number,
   ) {
@@ -65,6 +108,7 @@ export class CommitteesService {
       collectionSchema(CommitteeSummaryRawSchema),
       {
         SearchTerm: input.query,
+        CommitteeStatus: input.status,
         House:
           input.house === undefined
             ? undefined
@@ -77,7 +121,7 @@ export class CommitteesService {
         Skip: skip,
         Take: take,
       },
-      ['SearchTerm', 'House', 'ShowOnWebsiteOnly', 'Skip', 'Take'],
+      ['SearchTerm', 'CommitteeStatus', 'House', 'ShowOnWebsiteOnly', 'Skip', 'Take'],
     );
     return {
       ...response,
@@ -124,10 +168,11 @@ export class CommitteesService {
   /** Return every business type, including records with isInquiry=false. */
   async inquiries(
     call: ParliamentCall,
-    committeeId: string,
+    committeeId: string | undefined,
     query: string | undefined,
     skip: number,
     take: number,
+    filters: CommitteeBusinessFilters = {},
   ) {
     const response = await this.http.get(
       call,
@@ -135,13 +180,29 @@ export class CommitteesService {
       '/api/CommitteeBusiness',
       collectionSchema(CommitteeBusinessSummaryRawSchema),
       {
-        CommitteeId: Number(committeeId),
+        CommitteeId: committeeId === undefined ? undefined : Number(committeeId),
         SearchTerm: query,
+        Status: filters.status,
+        CurrentlyAcceptingEvidence: filters.acceptingEvidence,
+        DateFrom: filters.openedFrom,
+        DateTo: filters.openedTo,
+        SortOrder: filters.sortOrder,
         ShowOnWebsiteOnly: true,
         Skip: skip,
         Take: take,
       },
-      ['CommitteeId', 'SearchTerm', 'ShowOnWebsiteOnly', 'Skip', 'Take'],
+      [
+        'CommitteeId',
+        'SearchTerm',
+        'Status',
+        'CurrentlyAcceptingEvidence',
+        'DateFrom',
+        'DateTo',
+        'SortOrder',
+        'ShowOnWebsiteOnly',
+        'Skip',
+        'Take',
+      ],
     );
     return {
       ...response,
@@ -161,6 +222,7 @@ export class CommitteesService {
     query: string | undefined,
     skip: number,
     take: number,
+    filters: CommitteePublicationFilters = {},
   ) {
     const response = await this.http.get(
       call,
@@ -171,11 +233,26 @@ export class CommitteesService {
         CommitteeId: Number(committeeId),
         CommitteeBusinessId: businessId === undefined ? undefined : Number(businessId),
         SearchTerm: query,
+        SortOrder: filters.sortOrder,
+        PublicationTypeIds: filters.publicationTypeIds,
+        StartDate: filters.publishedFrom,
+        EndDate: filters.publishedTo,
         ShowOnWebsiteOnly: true,
         Skip: skip,
         Take: take,
       },
-      ['CommitteeId', 'CommitteeBusinessId', 'SearchTerm', 'ShowOnWebsiteOnly', 'Skip', 'Take'],
+      [
+        'CommitteeId',
+        'CommitteeBusinessId',
+        'SearchTerm',
+        'SortOrder',
+        'PublicationTypeIds',
+        'StartDate',
+        'EndDate',
+        'ShowOnWebsiteOnly',
+        'Skip',
+        'Take',
+      ],
     );
     return {
       ...response,
@@ -187,22 +264,67 @@ export class CommitteesService {
     };
   }
 
-  private async singular<T extends z.ZodType>(call: ParliamentCall, path: string, schema: T) {
-    try {
-      return await this.http.get(call, 'committees', path, schema, { showOnWebsiteOnly: true }, [
-        'showOnWebsiteOnly',
-      ]);
-    } catch (error) {
-      call.signal.throwIfAborted();
-      if (
-        error instanceof McpError &&
-        (error.code === JsonRpcErrorCode.NotFound ||
-          error.data?.status === 404 ||
-          error.data?.statusCode === 404)
-      )
-        return;
-      throw error;
+  private singular<T extends z.ZodType>(call: ParliamentCall, path: string, schema: T) {
+    return this.http.find(call, 'committees', path, schema, { showOnWebsiteOnly: true }, [
+      'showOnWebsiteOnly',
+    ]);
+  }
+
+  /** Page one business's website-visible written submissions or oral sessions. */
+  evidence(
+    call: ParliamentCall,
+    evidenceType: EvidenceType,
+    businessId: string,
+    skip: number,
+    take: number,
+  ) {
+    const fetch = async <T extends z.ZodType>(
+      path: string,
+      schema: T,
+      normalize: (value: z.output<T>) => z.infer<typeof CommitteeRecordSchema>,
+    ) => {
+      const response = await this.http.get(
+        call,
+        'committees',
+        path,
+        collectionSchema(schema),
+        {
+          CommitteeBusinessId: Number(businessId),
+          ShowOnWebsiteOnly: true,
+          Skip: skip,
+          Take: take,
+        },
+        ['CommitteeBusinessId', 'ShowOnWebsiteOnly', 'Skip', 'Take'],
+      );
+      return {
+        ...response,
+        data: {
+          ...response.data,
+          itemsState: response.data.items === null ? ('null' as const) : ('present' as const),
+          items: response.data.items?.map(normalize) ?? [],
+        },
+      };
+    };
+    return evidenceType === 'written'
+      ? fetch('/api/WrittenEvidence', WrittenEvidenceRawSchema, normalizeWrittenEvidence)
+      : fetch('/api/OralEvidence', OralEvidenceRawSchema, normalizeOralEvidence);
+  }
+  /** A missing evidence detail is a successful namespace-specific miss. */
+  async evidenceDetail(call: ParliamentCall, evidenceType: EvidenceType, evidenceId: string) {
+    if (evidenceType === 'written') {
+      const response = await this.singular(
+        call,
+        `/api/WrittenEvidence/${evidenceId}`,
+        WrittenEvidenceRawSchema,
+      );
+      return response ? { ...response, data: normalizeWrittenEvidence(response.data) } : undefined;
     }
+    const response = await this.singular(
+      call,
+      `/api/OralEvidence/${evidenceId}`,
+      OralEvidenceRawSchema,
+    );
+    return response ? { ...response, data: normalizeOralEvidence(response.data) } : undefined;
   }
 
   /** Missing entity 404 is a successful miss; operational failures propagate. */

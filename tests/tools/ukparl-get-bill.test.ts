@@ -21,6 +21,7 @@ import {
   stage,
   withFullBillsQueue,
 } from '../services/bills/bills-fixtures.js';
+import { renderedPayload } from './rendered-payload.js';
 
 function text(result: Awaited<ReturnType<typeof runToolContract>>) {
   return result.content
@@ -38,7 +39,15 @@ function expectScalars(rendered: string, value: unknown): void {
 }
 
 type Output = ReturnType<typeof ukparlGetBill.output.parse>;
-type Selection = { billId: string; section: 'overview' | 'stages'; limit?: number };
+type Selection = {
+  billId: string;
+  section: 'overview' | 'stages' | 'amendments';
+  billStageId?: string;
+  amendmentNumber?: string;
+  decision?: 'Agreed';
+  memberId?: string;
+  limit?: number;
+};
 
 /** Traverse every continuation descriptor and concatenate scalar chunks before decoding. */
 async function reconstruct(selection: Selection, initial: Output): Promise<unknown> {
@@ -138,28 +147,69 @@ describe('ukparl_get_bill selected content', () => {
       legislationHandoff: {
         status: 'unavailable',
         links: [],
-        reason: 'Parliament supplied no authoritative statute link.',
+        reason:
+          'Overview has not checked publications. Repeat ukparl_get_bill with the same billId and section=publications to discover authoritative statute links.',
       },
     });
     expectScalars(text(result), record.summary);
     expect(text(result)).toContain('https://example.org/promoter');
-    expect(text(result)).toContain('Parliament supplied no authoritative statute link.');
+    expect(text(result)).toContain('Overview has not checked publications.');
     expect(requests.map((url) => url.pathname)).toEqual(['/api/v1/Bills/11']);
   });
 
-  it.each([false, true, undefined])('never infers a statute link from isAct=%s', async (isAct) => {
-    installBills(() => ({
-      billId: 11,
-      shortTitle: 'Synthetic Act 2026 Chapter 1',
-      ...(isAct !== undefined ? { isAct } : {}),
-    }));
-    const result = await runToolContract(ukparlGetBill, { billId: '11' });
-    expect(result.structuredContent).toMatchObject({
-      legislationHandoff: { status: isAct === false ? 'not_enacted' : 'unavailable', links: [] },
-    });
-    expect(text(result)).toContain(isAct === false ? 'not_enacted' : 'unavailable');
-    expect(text(result)).not.toContain('https://www.legislation.gov.uk/ukpga/2026/1');
-  });
+  it.each([false, true, null, undefined])(
+    'never infers a statute link from isAct=%s',
+    async (isAct) => {
+      const requests = installBills(() => ({
+        billId: 11,
+        shortTitle: 'Synthetic Act 2026 Chapter 1',
+        ...(isAct !== undefined ? { isAct } : {}),
+      }));
+      const result = await runToolContract(ukparlGetBill, { billId: '11' });
+      expect(result.structuredContent).toMatchObject({
+        legislationHandoff: { status: isAct === false ? 'not_enacted' : 'unavailable', links: [] },
+      });
+      expect(text(result)).toContain(isAct === false ? 'not_enacted' : 'unavailable');
+      expect(text(result)).not.toContain('https://www.legislation.gov.uk/ukpga/2026/1');
+      if (isAct !== false) {
+        expect(result.structuredContent).toMatchObject({
+          legislationHandoff: {
+            reason:
+              'Overview has not checked publications. Repeat ukparl_get_bill with the same billId and section=publications to discover authoritative statute links.',
+          },
+        });
+        expect(text(result)).toContain('Overview has not checked publications.');
+      }
+      expect(requests).toHaveLength(1);
+    },
+  );
+
+  it.each([true, null, undefined])(
+    'only claims absence after checking publications for isAct=%s',
+    async (isAct) => {
+      const requests = installBills((url) =>
+        url.pathname.endsWith('/Publications')
+          ? { billId: 11, publications: [] }
+          : { billId: 11, ...(isAct !== undefined ? { isAct } : {}) },
+      );
+      const result = await runToolContract(ukparlGetBill, {
+        billId: '11',
+        section: 'publications',
+      });
+      expect(result.structuredContent).toMatchObject({
+        legislationHandoff: {
+          status: 'unavailable',
+          links: [],
+          reason: 'Parliament supplied no authoritative statute link.',
+        },
+      });
+      expect(text(result)).toContain('Parliament supplied no authoritative statute link.');
+      expect(requests.map((url) => url.pathname)).toEqual([
+        '/api/v1/Bills/11',
+        '/api/v1/Bills/11/Publications',
+      ]);
+    },
+  );
 
   it('returns all selected stage sittings, committee and next/previous occurrence IDs', async () => {
     installBills((url) =>
@@ -194,7 +244,7 @@ describe('ukparl_get_bill selected content', () => {
       },
     });
     for (const term of [
-      'stageSittings/1/id',
+      'stageSittings',
       '202',
       'hasMotions',
       '102',
@@ -202,6 +252,9 @@ describe('ukparl_get_bill selected content', () => {
       'https://committees.parliament.uk/committee/88',
     ])
       expect(text(result)).toContain(term);
+    expect(renderedPayload(text(result))).toMatchObject({
+      record: { stageSittings: [{ id: '201' }, { id: '202' }] },
+    });
   });
 
   it('returns full amendment text, sponsor links and true amendmentId on both surfaces', async () => {
@@ -315,6 +368,356 @@ describe('ukparl_get_bill selected content', () => {
 });
 
 describe('ukparl_get_bill boundaries and recovery', () => {
+  it.each([
+    {
+      input: { section: 'amendments' },
+      message: 'section=amendments requires billStageId; retrieve it with section=stages.',
+    },
+    {
+      input: { section: 'overview', billStageId: '101' },
+      message:
+        'billStageId is unsupported for section=overview; omit billStageId or select stage, amendments, amendment, motions or motion.',
+    },
+    {
+      input: { section: 'amendment', billStageId: '101' },
+      message: 'section=amendment requires itemId; retrieve it with section=amendments.',
+    },
+    {
+      input: { section: 'motions', billStageId: '101', itemId: '601' },
+      message:
+        'itemId is unsupported for section=motions; omit itemId or select amendment or motion.',
+    },
+    {
+      input: { section: 'stage', billStageId: '101', cursor: 'cursor' },
+      message:
+        'cursor is unsupported for section=stage; omit cursor or select stages, publications, amendments or motions.',
+    },
+    {
+      input: { section: 'amendment', billStageId: '101', itemId: '901', limit: 1 },
+      message:
+        'limit is unsupported for section=amendment; omit limit or select stages, publications, amendments or motions.',
+    },
+    {
+      input: { section: 'overview', amendmentNumber: '45' },
+      message:
+        'amendmentNumber is unsupported for section=overview; omit amendmentNumber or select amendments.',
+    },
+    {
+      input: { section: 'overview', decision: 'Agreed' },
+      message: 'decision is unsupported for section=overview; omit decision or select amendments.',
+    },
+    {
+      input: { section: 'overview', memberId: '77' },
+      message: 'memberId is unsupported for section=overview; omit memberId or select amendments.',
+    },
+    {
+      input: {
+        section: 'motion',
+        cursor: 'cursor',
+        limit: 1,
+        amendmentNumber: '45',
+        decision: 'All',
+        memberId: '77',
+      },
+      message:
+        'section=motion requires billStageId; retrieve it with section=stages. section=motion requires itemId; retrieve it with section=motions. cursor is unsupported for section=motion; omit cursor or select stages, publications, amendments or motions. limit is unsupported for section=motion; omit limit or select stages, publications, amendments or motions. amendmentNumber is unsupported for section=motion; omit amendmentNumber or select amendments. decision is unsupported for section=motion; omit decision or select amendments. memberId is unsupported for section=motion; omit memberId or select amendments.',
+    },
+  ] satisfies {
+    input: Omit<ReturnType<typeof ukparlGetBill.input.parse>, 'billId'>;
+    message: string;
+  }[])('names each selector conflict and repair before I/O: $input', async ({ input, message }) => {
+    const requests = installBills(() => bill());
+    const result = await runToolContract(ukparlGetBill, { billId: '11', ...input });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.InvalidParams,
+        message,
+        data: {
+          reason: 'invalid_mode_arguments',
+          recovery: {
+            hint: 'Call ukparl_lookup_reference with topic=identifiers, then repeat this tool with the fields required by its selected mode.',
+          },
+        },
+      },
+    });
+    expect(text(result)).toContain(message);
+    expect(text(result)).toContain('invalid_mode_arguments');
+    expect(text(result)).toContain('topic=identifiers');
+    expect(requests).toHaveLength(0);
+  });
+  it('keeps blank amendment-only form fields valid for overview', async () => {
+    const requests = installBills(() => bill());
+    const result = await runToolContract(ukparlGetBill, {
+      billId: '11',
+      amendmentNumber: ' ',
+      decision: '',
+      memberId: '',
+    });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      found: true,
+      section: 'overview',
+      record: { billId: '11' },
+    });
+    expect(requests.map((url) => url.pathname)).toEqual(['/api/v1/Bills/11']);
+  });
+  it.each([
+    'All',
+    'NoDecision',
+    'Withdrawn',
+    'Disagreed',
+    'NotMoved',
+    'Agreed',
+    'QuestionProposed',
+    'NotSelected',
+    'WithdrawnBeforeDebate',
+    'StoodPart',
+    'NotStoodPart',
+    'Preempted',
+    'NotCalled',
+    'NegativedOnDivision',
+    'AgreedOnDivision',
+  ])('supports published decision %s and successful filtered empty results', async (decision) => {
+    const requests = installBills((url) =>
+      url.pathname === '/api/v1/Bills/11' ? bill() : page(null),
+    );
+    const result = await runToolContract(ukparlGetBill, {
+      billId: '11',
+      section: 'amendments',
+      billStageId: '101',
+      decision,
+      amendmentNumber: '',
+      memberId: ' ',
+    });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      items: [],
+      page: { total: 0, returned: 0, hasMore: false },
+      applied: { decision },
+    });
+    expect(requests[1]!.searchParams.get('Decision')).toBe(decision);
+    expect(requests[1]!.searchParams.has('AmendmentNumber')).toBe(false);
+    expect(requests[1]!.searchParams.has('MemberId')).toBe(false);
+    expect(text(result)).toContain(decision);
+    expect(text(result)).toContain('source returned no items');
+  });
+
+  it.each([{ amendmentNumber: '46A' }, { decision: 'Withdrawn' }, { memberId: '78' }])(
+    'binds both amendment continuations to filters %j',
+    async (changed) => {
+      let summaryText = ['First', 'Second'];
+      const requests = installBills((url) =>
+        url.pathname === '/api/v1/Bills/11' ? bill() : page([{ ...amendment(), summaryText }], 2),
+      );
+      const selection: Selection = {
+        billId: '11',
+        section: 'amendments',
+        billStageId: '101',
+        amendmentNumber: '45A',
+        decision: 'Agreed',
+        memberId: '77',
+        limit: 1,
+      };
+      const first = await runToolContract(ukparlGetBill, selection);
+      const cursor = ukparlGetBill.output.parse(first.structuredContent).page!.nextCursor!;
+      summaryText = ['First'.repeat(10000), 'Second'.repeat(10000)];
+      const oversized = await runToolContract(ukparlGetBill, selection);
+      const contentCursor = ukparlGetBill.output.parse(oversized.structuredContent).contentPage!
+        .entries![0]!.contentCursor;
+      const before = requests.length;
+      const rebound = await runToolContract(ukparlGetBill, { ...selection, ...changed, cursor });
+      expect(rebound.structuredContent).toMatchObject({
+        error: { data: { reason: 'invalid_cursor' } },
+      });
+      expect(requests).toHaveLength(before);
+      const content = await runToolContract(ukparlGetBill, {
+        ...selection,
+        ...changed,
+        contentCursor,
+      });
+      expect(content.structuredContent).toMatchObject({
+        error: { data: { reason: 'invalid_cursor' } },
+      });
+      expect(text(content)).toContain('same filters and no cursor or contentCursor');
+    },
+  );
+
+  it('reconstructs nested oversized filtered amendment summaries with every sponsor and line', async () => {
+    const summary = [
+      '<p>First complete summary</p>'.repeat(1500),
+      'Second complete line'.repeat(1500),
+    ];
+    installBills((url) =>
+      url.pathname === '/api/v1/Bills/11'
+        ? bill()
+        : page([{ ...amendment(), summaryText: summary }]),
+    );
+    const selection: Selection = {
+      billId: '11',
+      section: 'amendments',
+      billStageId: '101',
+      amendmentNumber: '45A',
+      decision: 'Agreed',
+      memberId: '77',
+      limit: 1,
+    };
+    const first = await runToolContract(ukparlGetBill, selection);
+    expect(first.isError).not.toBe(true);
+    const output = ukparlGetBill.output.parse(first.structuredContent);
+    const rebuilt = await reconstruct(selection, output);
+    expect(rebuilt).toMatchObject({
+      items: [
+        {
+          amendmentId: '901',
+          summaryText: summary,
+          sponsors: [{ memberId: '77', house: 'commons' }],
+        },
+      ],
+    });
+  });
+
+  it('pages a filtered amendment collection and accepts offsets past its end with the effective cap', async () => {
+    const rows = [amendment(901), amendment(902), amendment(903)];
+    const requests = installBills((url) =>
+      url.pathname === '/api/v1/Bills/11'
+        ? bill()
+        : page(
+            rows.slice(
+              Number(url.searchParams.get('Skip')),
+              Number(url.searchParams.get('Skip')) + Number(url.searchParams.get('Take')),
+            ),
+            3,
+          ),
+    );
+    const selection: Selection = {
+      billId: '11',
+      section: 'amendments',
+      billStageId: '101',
+      amendmentNumber: '45A',
+      memberId: '77',
+      limit: 2,
+    };
+    const first = await runToolContract(ukparlGetBill, selection);
+    const output = ukparlGetBill.output.parse(first.structuredContent);
+    const last = await runToolContract(ukparlGetBill, {
+      ...selection,
+      cursor: output.page!.nextCursor!,
+    });
+    expect(last.structuredContent).toMatchObject({
+      items: [{ amendmentId: '903' }],
+      page: { total: 3, returned: 1, hasMore: false },
+    });
+    expect(text(last)).toContain('903');
+    const past = encodeCursor({
+      v: 1,
+      source: 'bills',
+      selector: 'amendments',
+      filters: digest({
+        billId: '11',
+        section: 'amendments',
+        billStageId: '101',
+        amendmentNumber: '45A',
+        memberId: '77',
+      }),
+      offset: 99,
+      nativePageSize: 2,
+    });
+    const empty = await runToolContract(ukparlGetBill, { ...selection, cursor: past });
+    expect(empty.structuredContent).toMatchObject({
+      items: [],
+      page: { total: 3, returned: 0, hasMore: false },
+    });
+    expect(renderedPayload(text(empty))).toMatchObject({ page: { hasMore: false } });
+    const capped = await runToolContract(ukparlGetBill, { ...selection, limit: 500 });
+    expect(capped.structuredContent).toMatchObject({ applied: { limit: 50 }, requestedLimit: 500 });
+    expect(requests.at(-1)!.searchParams.get('Take')).toBe('50');
+    expect(
+      requests
+        .filter((url) => url.pathname.endsWith('/Amendments'))
+        .every(
+          (url) =>
+            url.searchParams.get('AmendmentNumber') === '45A' &&
+            url.searchParams.get('MemberId') === '77',
+        ),
+    ).toBe(true);
+  });
+
+  it.each([{ decision: 'NotADecision' }, { memberId: '0' }, { amendmentNumber: { number: '45' } }])(
+    'rejects invalid amendment input %j before I/O',
+    async (input) => {
+      const requests = installBills(() => bill());
+      const result = await runToolContract(ukparlGetBill, {
+        billId: '11',
+        section: 'amendments',
+        billStageId: '101',
+        ...input,
+      });
+      expect(result.isError).toBe(true);
+      expect(requests).toHaveLength(0);
+    },
+  );
+  it('forwards combined amendment filters before paging and retains both output surfaces', async () => {
+    const requests = installBills((url) =>
+      url.pathname === '/api/v1/Bills/11' ? bill() : page([amendment()], 2),
+    );
+    const result = await runToolContract(ukparlGetBill, {
+      billId: '11',
+      section: 'amendments',
+      billStageId: '101',
+      amendmentNumber: ' 45A ',
+      decision: 'AgreedOnDivision',
+      memberId: '0077',
+      limit: 1,
+    });
+    expect(result.isError).not.toBe(true);
+    expect([...requests[1]!.searchParams]).toEqual([
+      ['Skip', '0'],
+      ['Take', '1'],
+      ['AmendmentNumber', '45A'],
+      ['Decision', 'AgreedOnDivision'],
+      ['MemberId', '77'],
+    ]);
+    expect(result.structuredContent).toMatchObject({
+      applied: { amendmentNumber: '45A', decision: 'AgreedOnDivision', memberId: '77' },
+      items: [{ amendmentId: '901', sponsors: [{ memberId: '77' }] }],
+      page: { total: 2, returned: 1, hasMore: true },
+    });
+    for (const value of [
+      '45A',
+      'AgreedOnDivision',
+      '77',
+      'Second summary line',
+      'https://bills-api.parliament.uk',
+    ])
+      expect(text(result)).toContain(value);
+  });
+
+  it.each(
+    (
+      ['overview', 'stages', 'stage', 'publications', 'amendment', 'motions', 'motion'] as const
+    ).flatMap((section) => [
+      { section, filter: { amendmentNumber: '45' } },
+      { section, filter: { decision: 'Agreed' } },
+      { section, filter: { memberId: '77' } },
+    ]),
+  )('rejects amendment filters in $section before I/O: $filter', async ({ section, filter }) => {
+    const requests = installBills(() => bill());
+    const result = await runToolContract(ukparlGetBill, {
+      billId: '11',
+      section,
+      ...(['stage', 'amendment', 'motions', 'motion'].includes(section)
+        ? { billStageId: '101' }
+        : {}),
+      ...(['amendment', 'motion'].includes(section) ? { itemId: '901' } : {}),
+      ...filter,
+    });
+    expect(result.structuredContent).toMatchObject({
+      error: { data: { reason: 'invalid_mode_arguments' } },
+    });
+    expect(requests).toHaveLength(0);
+    expect(text(result)).toContain('topic=identifiers');
+  });
   it.each(
     (['stages', 'amendments', 'motions'] as const).flatMap((section) => [
       { section, items: [] },
@@ -371,7 +774,7 @@ describe('ukparl_get_bill boundaries and recovery', () => {
     expect(ukparlGetBill.output.parse(result.structuredContent).page).not.toHaveProperty(
       'nextCursor',
     );
-    expect(text(result)).toContain('/page/hasMore\n```json\nfalse');
+    expect(renderedPayload(text(result))).toMatchObject({ page: { hasMore: false } });
   });
 
   it('renders real queue saturation with selected-tool recovery on both surfaces', async () => {

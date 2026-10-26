@@ -6,10 +6,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, validationError } from '@cyanheads/mcp-ts-core/errors';
 import { MemberLinkSchema, MemberSchema } from '@/services/members/member-models.js';
 import { getMembers } from '@/services/members/members-service.js';
-import {
-  advanceCollectionCursor,
-  readCollectionCursor,
-} from '@/services/parliament-http/parliament-cursors.js';
+import { pageFor, readCollectionCursor } from '@/services/parliament-http/parliament-cursors.js';
 import {
   DeliveryShape,
   deliverPayload,
@@ -233,11 +230,17 @@ export const ukparlSearchMembers = tool('ukparl_search_members', {
       ...(input.limit > 20 ? { requestedLimit: input.limit } : {}),
     };
     ctx.enrich(enrichment);
-    if (input.asOf && (input.constituency || input.partyId || input.house || input.currentOnly))
-      throw ctx.fail(
-        'invalid_mode_arguments',
-        'Historical search supports name and pagination only.',
+    if (input.asOf) {
+      const conflicts: string[] = (['constituency', 'partyId', 'house'] as const).filter(
+        (field) => input[field],
       );
+      if (input.currentOnly) conflicts.push('currentOnly=true');
+      if (conflicts.length)
+        throw ctx.fail(
+          'invalid_mode_arguments',
+          `asOf cannot be combined with ${conflicts.join(', ')}; remove the conflicting filter or asOf.`,
+        );
+    }
     const cursor = readCollectionCursor(input.cursor, {
       source: 'members',
       selector: mode,
@@ -246,21 +249,17 @@ export const ukparlSearchMembers = tool('ukparl_search_members', {
     });
     using call = getParliamentHttp().beginCall(ctx);
     const result = await getMembers().search(call, query, cursor.offset, limit);
-    const items = (result.data.items ?? []).map((item) =>
-      item.value
-        ? {
-            ...item.value,
-            memberId: String(item.value.id),
-            links: item.links,
-            source: result.source,
-            detailLevel: 'summary' as const,
-          }
-        : null,
-    );
-    const present = items.filter((item) => item !== null);
-    if (present.length !== items.length)
-      throw validationError('Members search supplied a null member record.');
-    if (present.length === 0 && cursor.offset < result.data.totalResults)
+    const items = (result.data.items ?? []).map((item) => {
+      if (!item.value) throw validationError('Members search supplied a null member record.');
+      return {
+        ...item.value,
+        memberId: String(item.value.id),
+        links: item.links,
+        source: result.source,
+        detailLevel: 'summary' as const,
+      };
+    });
+    if (items.length === 0 && cursor.offset < result.data.totalResults)
       throw validationError(
         'Members search supplied no records before its reported collection end.',
       );
@@ -274,23 +273,15 @@ export const ukparlSearchMembers = tool('ukparl_search_members', {
               'No members matched. Repeat ukparl_search_members with broader name or location text, fewer filters, or currentOnly=false.',
           }
         : {}),
-      items: present.slice(0, count),
+      items: items.slice(0, count),
       source: result.source,
-      page: {
-        returned: count,
-        total: result.data.totalResults,
-        hasMore: cursor.offset + count < result.data.totalResults,
-        ...(cursor.offset + count < result.data.totalResults
-          ? { nextCursor: advanceCollectionCursor(cursor, count) }
-          : {}),
-      },
+      page: pageFor(cursor, count, result.data.totalResults),
     });
-    const payload = repage(present.length);
-    return deliverPayload(payload, {
+    return deliverPayload(repage(items.length), {
       tool: 'ukparl_search_members',
       selection: { query, limit, cursor: input.cursor },
       contentCursor: input.contentCursor,
-      collection: { count: present.length, repage },
+      collection: { count: items.length, repage },
       enrichmentFor: (selected) => ({
         ...enrichment,
         truncated: selected.page.hasMore,

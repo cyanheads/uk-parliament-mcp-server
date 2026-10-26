@@ -23,6 +23,7 @@ import {
   page,
   question,
 } from '../services/questions/questions-fixtures.js';
+import { renderedPayload } from './rendered-payload.js';
 
 function text(result: Awaited<ReturnType<typeof runToolContract>>) {
   return result.content
@@ -41,6 +42,150 @@ afterEach(() => {
 });
 
 describe('ukparl_search_questions', () => {
+  it.each([' hl01234 ', '036068', 'not-a-question-uin'])(
+    'preserves exact UIN lookup characters and distinct answering-member selection: %s',
+    async (uin) => {
+      const { requests } = installQuestions(() => page([{ ...question(), uin: 'HL01234' }], 4));
+      const result = await run({
+        uin,
+        answeringMemberId: '078',
+        memberId: '77',
+        house: 'commons',
+        tabledFrom: '2026-02-01',
+        tabledTo: '2026-02-01',
+        limit: 1,
+      });
+      expect(result.isError).not.toBe(true);
+      const normalized = uin === ' hl01234 ' ? 'HL01234' : uin;
+      expect(requests[0]!.searchParams.get('uIN')).toBe(normalized);
+      expect(requests[0]!.searchParams.get('answeringMemberId')).toBe('78');
+      expect(requests[0]!.searchParams.get('askingMemberId')).toBe('77');
+      expect(requests[0]!.searchParams.get('house')).toBe('Commons');
+      expect(result.structuredContent).toMatchObject({
+        filters: { uin: normalized, answeringMemberId: '78', memberId: '77' },
+        items: [{ questionId: '701', uin: 'HL01234' }],
+        page: { total: 4, returned: 1, hasMore: true },
+      });
+      expect(renderedPayload(text(result))).toMatchObject({
+        filters: { uin: normalized, answeringMemberId: '78' },
+      });
+      expect(text(result)).toContain(JSON.stringify(normalized));
+    },
+  );
+  it('binds both new question filters through whole-record continuations without inferring House', async () => {
+    const rows = Array.from({ length: 4 }, (_, index) => ({
+      ...question(701 + index),
+      uin: 'HL1234',
+    }));
+    const { requests } = installQuestions((url) =>
+      page(
+        rows.slice(
+          Number(url.searchParams.get('skip')),
+          Number(url.searchParams.get('skip')) + Number(url.searchParams.get('take')),
+        ),
+        4,
+      ),
+    );
+    const selection = { uin: 'hl1234', answeringMemberId: '78', limit: 1 };
+    const ids: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const result = await run({ ...selection, ...(cursor ? { cursor } : {}) });
+      expect(result.isError).not.toBe(true);
+      const output = ukparlSearchQuestions.output.parse(result.structuredContent);
+      expect(output.filters).toEqual({ uin: 'HL1234', answeringMemberId: '78' });
+      expect(requests.at(-1)!.searchParams.has('house')).toBe(false);
+      expect(requests.at(-1)!.origin).toBe('https://questions-statements-api.parliament.uk');
+      ids.push(...output.items!.map((row) => row.questionId));
+      cursor = output.page!.nextCursor;
+      if (cursor) {
+        for (const change of [{ uin: 'HL01234' }, { answeringMemberId: '79' }]) {
+          const before = requests.length;
+          const rebound = await run({ ...selection, ...change, cursor });
+          expect(rebound.structuredContent).toMatchObject({
+            error: { data: { reason: 'invalid_cursor' } },
+          });
+          expect(text(rebound)).toContain('no cursor or contentCursor');
+          expect(requests).toHaveLength(before);
+        }
+      }
+    } while (cursor);
+    expect(ids).toEqual(['701', '702', '703', '704']);
+  });
+  it.each(['uin', 'answeringMemberId'])(
+    'rejects search-only %s in detail and omits blank form values',
+    async (field) => {
+      const { requests } = installQuestions(() => item());
+      const invalid = await run({ mode: 'detail', questionId: '701', [field]: '42' });
+      expect(invalid.structuredContent).toMatchObject({
+        error: { data: { reason: 'invalid_mode_arguments' } },
+      });
+      expect(text(invalid)).toContain('ukparl_lookup_reference');
+      expect(requests).toEqual([]);
+      const valid = await run({ mode: 'detail', questionId: '701', [field]: '   ' });
+      expect(valid.isError).not.toBe(true);
+      expect(requests).toHaveLength(1);
+    },
+  );
+  it('keeps a no-match UIN successful at the cap and past the reported end', async () => {
+    const { requests } = installQuestions(() => page([]));
+    const selection = { uin: '036068', answeringMemberId: '78', house: 'lords' as const };
+    const first = await run({ ...selection, limit: 999 });
+    expect(first.structuredContent).toMatchObject({
+      filters: selection,
+      items: [],
+      page: { total: 0, returned: 0, hasMore: false },
+      cap: 20,
+    });
+    expect(text(first)).toContain('No questions matched');
+    const cursor = advanceCollectionCursor(
+      readCollectionCursor(undefined, {
+        source: 'questions',
+        selector: 'search',
+        filters: selection,
+        nativePageSize: 20,
+      }),
+      99,
+    );
+    const past = await run({ ...selection, limit: 999, cursor });
+    expect(past.isError).not.toBe(true);
+    expect(past.structuredContent).toMatchObject({
+      items: [],
+      page: { total: 0, returned: 0, hasMore: false },
+    });
+    expect(requests.at(-1)!.searchParams.get('skip')).toBe('99');
+    expect(requests.at(-1)!.searchParams.get('uIN')).toBe('036068');
+  });
+  it.each([{ uin: { value: '36068' } }, { answeringMemberId: '2147483648' }])(
+    'rejects invalid new search input %j before I/O',
+    async (input) => {
+      const { requests } = installQuestions(() => page([]));
+      const result = await run(input);
+      expect(result.structuredContent).toMatchObject({
+        error: { code: JsonRpcErrorCode.InvalidParams },
+      });
+      expect(requests).toEqual([]);
+    },
+  );
+  it('binds UIN and answering member to oversized search content continuations', async () => {
+    installQuestions(() => page([question(701, '<p>Source HTML 文</p>'.repeat(2000))]));
+    const selection = { uin: 'HL01234', answeringMemberId: '78' };
+    const first = await run(selection);
+    expect(first.isError).not.toBe(true);
+    const root = ukparlSearchQuestions.output.parse(first.structuredContent);
+    expect(root.delivery).toBe('outline');
+    const contentCursor = root.contentPage!.entries![0]!.contentCursor;
+    for (const change of [{ uin: 'HL1234' }, { answeringMemberId: '79' }]) {
+      const rebound = await run({ ...selection, ...change, contentCursor });
+      expect(rebound.structuredContent).toMatchObject({
+        error: { data: { reason: 'invalid_cursor' } },
+      });
+      expect(text(rebound)).toContain('no cursor or contentCursor');
+    }
+    const valid = await run({ ...selection, contentCursor });
+    expect(valid.isError).not.toBe(true);
+    expect(text(valid)).toContain('ukparl_search_questions');
+  });
   it.each(['tabledFrom', 'tabledTo', 'answeredFrom', 'answeredTo'])(
     'advertises the YYYY-MM-DD pattern for %s',
     (field) => {
@@ -130,10 +275,7 @@ describe('ukparl_search_questions', () => {
       found: true,
       record: { ...value, questionId: '701', detailLevel: 'complete' },
     });
-    for (const [key, field] of Object.entries(value)) {
-      expect(text(result)).toContain(`/record/${key}`);
-      if (typeof field === 'string') expect(text(result)).toContain(JSON.stringify(field));
-    }
+    expect(renderedPayload(text(result))).toMatchObject({ record: value });
     for (const url of [
       'https://example.org/one.pdf',
       'https://example.org/two.csv',
@@ -156,8 +298,8 @@ describe('ukparl_search_questions', () => {
     });
     for (const key of ['attachmentCount', 'isWithdrawn', 'dateAnswered', 'answerIsHolding'])
       expect(output.record).not.toHaveProperty(key);
-    expect(text(result)).toContain('/record/answerText\n```json\nnull');
-    expect(text(result)).not.toContain('/record/attachmentCount');
+    expect(renderedPayload(text(result))).toMatchObject({ record: { answerText: null } });
+    expect(renderedPayload(text(result)).record).not.toHaveProperty('attachmentCount');
   });
   it.each([
     { mode: 'detail' },
@@ -175,6 +317,43 @@ describe('ukparl_search_questions', () => {
     expect(text(result)).toContain('identifiers');
     expect(requests).toEqual([]);
   });
+  it.each([
+    [
+      { mode: 'detail' },
+      'mode=detail requires questionId; use an ID returned by mode=search, not a UIN.',
+    ],
+    [{ questionId: '701' }, 'mode=search does not accept questionId; omit it or use mode=detail.'],
+    [
+      {
+        mode: 'detail',
+        questionId: '701',
+        answered: false,
+        uin: 'HL1',
+        answeringMemberId: '2',
+        cursor: 'x',
+        limit: 1,
+      },
+      'mode=detail does not accept uin, answeringMemberId, answered, cursor, limit; remove these fields or use mode=search.',
+    ],
+    [
+      { mode: 'detail', query: 'x' },
+      'mode=detail requires questionId; use an ID returned by mode=search, not a UIN. mode=detail does not accept query; remove these fields or use mode=search.',
+    ],
+  ])('names question conflicts on both surfaces: %j', async (input, message) => {
+    const { requests } = installQuestions(() => item());
+    const result = await run(input);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.InvalidParams,
+        message,
+        data: { reason: 'invalid_mode_arguments' },
+      },
+    });
+    expect(text(result)).toContain(message);
+    expect(text(result)).toContain('topic=identifiers');
+    expect(requests).toEqual([]);
+  });
+
   it.each([{ tabledFrom: '2026-02-30' }, { answeredFrom: '2026-03-01', answeredTo: '2026-02-01' }])(
     'rejects invalid dates %j before I/O',
     async (input) => {

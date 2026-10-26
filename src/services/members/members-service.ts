@@ -3,7 +3,6 @@
  * @module services/members/members-service
  */
 import { z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import {
   getParliamentHttp,
   type ParliamentCall,
@@ -67,25 +66,13 @@ export class MembersService {
   }
 
   /** Missing profile is a successful absence; transport and validation failures still propagate. */
-  async profile(call: ParliamentCall, memberId: string) {
-    try {
-      return await this.http.get(
-        call,
-        'members',
-        `/api/Members/${memberId}`,
-        memberValueSchema(MemberSchema),
-      );
-    } catch (error) {
-      call.signal.throwIfAborted();
-      if (
-        error instanceof McpError &&
-        (error.code === JsonRpcErrorCode.NotFound ||
-          error.data?.status === 404 ||
-          error.data?.statusCode === 404)
-      )
-        return;
-      throw error;
-    }
+  profile(call: ParliamentCall, memberId: string) {
+    return this.http.find(
+      call,
+      'members',
+      `/api/Members/${memberId}`,
+      memberValueSchema(MemberSchema),
+    );
   }
   /** Fetch the whole biography once; preserve null categories rather than fabricating empty history. */
   biography(call: ParliamentCall, memberId: string) {

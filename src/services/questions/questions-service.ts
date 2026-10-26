@@ -2,7 +2,7 @@
  * @fileoverview Written-question search and detail without search-hit hydration.
  * @module services/questions/questions-service
  */
-import { invalidParams, JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { invalidParams } from '@cyanheads/mcp-ts-core/errors';
 import { getMembers } from '../members/members-service.js';
 import {
   getParliamentHttp,
@@ -18,11 +18,13 @@ export interface QuestionsSearch {
   answeredFrom?: string | undefined;
   answeredTo?: string | undefined;
   answeringBodyIds?: string[] | undefined;
+  answeringMemberId?: string | undefined;
   house?: House | undefined;
   memberId?: string | undefined;
   query?: string | undefined;
   tabledFrom?: string | undefined;
   tabledTo?: string | undefined;
+  uin?: string | undefined;
 }
 /** Source adapters reuse the caller-owned deadline, including reference validation. */
 export class QuestionsService {
@@ -49,7 +51,10 @@ export class QuestionsService {
       QuestionSearchSchema,
       {
         searchTerm: input.query,
+        uIN: input.uin,
         askingMemberId: input.memberId === undefined ? undefined : Number(input.memberId),
+        answeringMemberId:
+          input.answeringMemberId === undefined ? undefined : Number(input.answeringMemberId),
         answeringBodies: input.answeringBodyIds?.map(Number),
         house:
           input.house === undefined ? undefined : input.house === 'commons' ? 'Commons' : 'Lords',
@@ -67,7 +72,9 @@ export class QuestionsService {
       },
       [
         'searchTerm',
+        'uIN',
         'askingMemberId',
+        'answeringMemberId',
         'answeringBodies',
         'house',
         'answered',
@@ -86,27 +93,15 @@ export class QuestionsService {
   }
 
   /** Entity 404 alone becomes a successful miss; all other failures remain explicit. */
-  async detail(call: ParliamentCall, questionId: string) {
-    try {
-      return await this.http.get(
-        call,
-        'questions',
-        `/api/writtenquestions/questions/${questionId}`,
-        QuestionItemSchema,
-        { expandMember: true, sessionStatus: 'Any' },
-        ['expandMember', 'sessionStatus'],
-      );
-    } catch (error) {
-      call.signal.throwIfAborted();
-      if (
-        error instanceof McpError &&
-        (error.code === JsonRpcErrorCode.NotFound ||
-          error.data?.status === 404 ||
-          error.data?.statusCode === 404)
-      )
-        return;
-      throw error;
-    }
+  detail(call: ParliamentCall, questionId: string) {
+    return this.http.find(
+      call,
+      'questions',
+      `/api/writtenquestions/questions/${questionId}`,
+      QuestionItemSchema,
+      { expandMember: true, sessionStatus: 'Any' },
+      ['expandMember', 'sessionStatus'],
+    );
   }
 }
 let service: QuestionsService | undefined;

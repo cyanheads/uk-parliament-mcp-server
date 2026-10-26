@@ -153,6 +153,8 @@ export function installBills(route: (url: URL) => unknown | Response) {
   const requests: URL[] = [];
   initParliamentHttp({
     exchange: async (url) => {
+      if (url.origin !== 'https://bills-api.parliament.uk')
+        throw new Error(`Unexpected origin ${url.origin}`);
       requests.push(new URL(url));
       const data = route(url);
       return data instanceof Response ? data : Response.json(data);

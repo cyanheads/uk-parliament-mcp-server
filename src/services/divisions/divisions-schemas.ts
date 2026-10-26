@@ -83,6 +83,26 @@ export const LordsDivisionSchema = z.object({
   contents: z.array(LordsMember).nullish(),
   notContents: z.array(LordsMember).nullish(),
 });
+/** Commons member-voting wrapper; exactly one published lobby must be recorded. */
+export const CommonsMemberVoteSchema = z
+  .object({
+    MemberId: rawId,
+    MemberVotedAye: z.boolean(),
+    MemberVotedNo: z.boolean(),
+    MemberWasTeller: z.boolean(),
+    PublishedDivision: CommonsDivisionSchema,
+  })
+  .refine(
+    (row) => row.MemberVotedAye !== row.MemberVotedNo,
+    'Exactly one Commons vote direction is required.',
+  );
+/** Lords member-voting wrapper; false denotes not-content within this source record. */
+export const LordsMemberVoteSchema = z.object({
+  memberId: rawId,
+  memberWasContent: z.boolean(),
+  memberWasTeller: z.boolean(),
+  publishedDivision: LordsDivisionSchema,
+});
 /** Native lobby labels; not_recorded is never an abstention claim. */
 export const LobbySchema = z.enum(['aye', 'no', 'content', 'not_content', 'not_recorded']);
 /** Complete normalized member fields, retained on both client surfaces. */
@@ -109,6 +129,18 @@ export type Voter = z.infer<typeof VoterSchema>;
 export const DivisionSchema = z
   .object({
     divisionId: z.string().describe('Division ID scoped to the accompanying House.'),
+    memberVote: z
+      .object({
+        memberId: z.string().describe('Selected member identity supplied by the voting record.'),
+        lobby: z
+          .enum(['aye', 'no', 'content', 'not_content'])
+          .describe('Recorded House-native vote direction.'),
+        wasTeller: z
+          .boolean()
+          .describe('Source identifies this member as a teller for this division.'),
+      })
+      .optional()
+      .describe('Selected member vote, present only in member-filtered search results.'),
     date: text.describe('Source division date and time.'),
     number: count.describe('House session division number; distinct from divisionId.'),
     title: text.describe('Complete division title.'),

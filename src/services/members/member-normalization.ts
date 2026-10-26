@@ -95,7 +95,7 @@ export const FlatCommitteeSchema = CommitteeSeatSchema.omit({
   })
   .describe('Complete typed committee record with explicit tree relationships.');
 /** A single committee seat and every related committee occurrence. */
-export const FlatCommitteeSeatSchema = z.object({
+const FlatCommitteeSeatSchema = z.object({
   value: FlatCommitteeSchema.describe('Selected root committee seat.'),
   relatedCommittees: z
     .array(FlatCommitteeSchema)

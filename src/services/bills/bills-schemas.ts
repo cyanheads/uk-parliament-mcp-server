@@ -6,6 +6,32 @@ import { z } from '@cyanheads/mcp-ts-core';
 import { DeliveryShape } from '../parliament-http/parliament-delivery.js';
 import { LinkSchema, PageSchema, SourceSchema } from '../parliament-http/parliament-models.js';
 
+/** Official Bills ordering; omission retains the source default. */
+export const BillSortOrderSchema = z.enum([
+  'TitleAscending',
+  'TitleDescending',
+  'DateUpdatedAscending',
+  'DateUpdatedDescending',
+]);
+/** Complete published amendment decision search grammar. */
+export const AmendmentDecisionSchema = z.enum([
+  'All',
+  'NoDecision',
+  'Withdrawn',
+  'Disagreed',
+  'NotMoved',
+  'Agreed',
+  'QuestionProposed',
+  'NotSelected',
+  'WithdrawnBeforeDebate',
+  'StoodPart',
+  'NotStoodPart',
+  'Preempted',
+  'NotCalled',
+  'NegativedOnDivision',
+  'AgreedOnDivision',
+]);
+
 function models<T extends z.ZodType>(id: T, house: z.ZodType<string>) {
   const text = z.string().nullish();
   const integer = z.number().int().nullish();
@@ -384,10 +410,10 @@ export const BillSectionSchema = z.enum([
   'motion',
 ]);
 /** Explicit statute handoff based solely on supplied publication URLs. */
-export const LegislationHandoffSchema = z.object({
+const LegislationHandoffSchema = z.object({
   status: z
     .enum(['not_enacted', 'authoritative_link', 'unavailable'])
-    .describe('Verified handoff state.'),
+    .describe('Source-only handoff state; unavailable may mean publications remain unchecked.'),
   links: z
     .array(LinkSchema.describe('One actual authoritative statute link.'))
     .describe('Actual authoritative statute links.'),
@@ -403,14 +429,14 @@ export const BillHitSchema = Bills.bill
   })
   .describe('One bill summary and its provenance.');
 /** All typed selected Bills records. */
-export const BillRecordSchema = z.union([
+const BillRecordSchema = z.union([
   Bills.billDetail.strict().describe('Complete bill overview.'),
   Bills.stageDetail.strict().describe('Complete stage occurrence.'),
   Bills.amendmentDetail.strict().describe('Complete amendment detail.'),
   Bills.normalizedMotion.strict().describe('Complete ping-pong item with its source wrapper type.'),
 ]);
 /** All typed selected Bills collection rows. */
-export const BillItemSchema = z
+const BillItemSchema = z
   .union([
     Bills.stage.strict().describe('One stage occurrence.'),
     Bills.publication.strict().describe('One complete publication.'),

@@ -41,7 +41,7 @@ export const HouseSchema = z.preprocess(
 /** Canonical House used by public records. */
 export type House = z.infer<typeof HouseSchema>;
 /** Official API namespaces; IDs from different sources are not interchangeable. */
-export const ApiSchema = z.enum([
+const ApiSchema = z.enum([
   'bills',
   'members',
   'commons_votes',

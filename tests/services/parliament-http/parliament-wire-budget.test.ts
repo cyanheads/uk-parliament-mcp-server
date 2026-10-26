@@ -75,7 +75,10 @@ it('keeps the framework-composed wire result within 24000 bytes near the deliver
       .join('\n');
     expect(text).toContain('200');
     expect(text).toContain(notice);
-    expect(Buffer.byteLength(JSON.stringify(result)), `size=${size}`).toBeLessThanOrEqual(24000);
+    expect(
+      Buffer.byteLength(JSON.stringify({ jsonrpc: '2.0', id: Number.MAX_SAFE_INTEGER, result })),
+      `size=${size}`,
+    ).toBeLessThanOrEqual(24000);
   }
 });
 
@@ -141,5 +144,62 @@ it('measures collection enrichment from the actual emitted whole-item count', as
     .join('\n');
   expect(text).toContain(`shown\n\`\`\`json\n${output.items.length}\n\`\`\``);
   expect(text).toContain('truncated\n```json\ntrue\n```');
-  expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(24000);
+  expect(
+    Buffer.byteLength(JSON.stringify({ jsonrpc: '2.0', id: Number.MAX_SAFE_INTEGER, result })),
+  ).toBeLessThanOrEqual(24000);
+});
+
+it('fits inline children and Unicode fragments with final enrichment and JSON-RPC framing', async () => {
+  const payload = {
+    large: '🦊\n"source"\\<p>HTML</p>'.repeat(1600),
+    small: { nullable: null, empty: [], source: 'https://example.test/source' },
+  };
+  const notice = 'Parliamentary source notice. '.repeat(50);
+  const definition = tool('parliament_fragment_budget_fixture', {
+    description: 'Exercise final enriched recursive delivery wire envelopes.',
+    input: z.object({ contentCursor: z.string().optional() }),
+    output: z.object({ ...DeliveryShape }),
+    enrichment: { notice: z.string() },
+    enrichmentTrailer: { notice: { render: enrichmentField('notice') } },
+    handler(input, ctx) {
+      return deliverPayload(payload, {
+        tool: 'parliament_fragment_budget_fixture',
+        selection: {},
+        contentCursor: input.contentCursor,
+        enrichmentFor: () => ({ notice }),
+        applyEnrichment: (values) => ctx.enrich(values),
+      });
+    },
+    format: formatData,
+  });
+  const check = async (contentCursor?: string) => {
+    const result = await runToolContract(definition, contentCursor ? { contentCursor } : {});
+    expect(result.isError).not.toBe(true);
+    expect(
+      Buffer.byteLength(JSON.stringify({ jsonrpc: '2.0', id: Number.MAX_SAFE_INTEGER, result })),
+    ).toBeLessThanOrEqual(24000);
+    expect(result.structuredContent).toMatchObject({ notice });
+    return { result, output: definition.output.parse(result.structuredContent) };
+  };
+  const root = await check();
+  const entries = root.output.contentPage!.entries!;
+  const small = entries.find((entry) => entry.path === '/small')!;
+  expect(JSON.parse(small.jsonValue!)).toEqual(payload.small);
+  expect(root.result.content[0]).toMatchObject({
+    text: expect.stringContaining('[Open source link](<https://example.test/source>)'),
+  });
+  const fetched = await check(small.contentCursor);
+  expect(JSON.parse(fetched.output.contentPage!.fragment!)).toEqual(payload.small);
+  let cursor: string | undefined = entries.find((entry) => entry.path === '/large')!.contentCursor;
+  let encoded = '';
+  do {
+    const next = await check(cursor);
+    const page = next.output.contentPage!;
+    expect(page.offset).toBe(encoded.length);
+    expect(page.fragment!.length).toBeGreaterThan(0);
+    expect(/[\uD800-\uDBFF]$/.test(page.fragment!)).toBe(false);
+    encoded += page.fragment;
+    cursor = page.nextCursor;
+  } while (cursor);
+  expect(JSON.parse(encoded)).toBe(payload.large);
 });

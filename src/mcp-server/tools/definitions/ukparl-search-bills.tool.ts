@@ -4,7 +4,7 @@
  */
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { BillHitSchema } from '@/services/bills/bills-schemas.js';
+import { BillHitSchema, BillSortOrderSchema } from '@/services/bills/bills-schemas.js';
 import { getBillsService } from '@/services/bills/bills-service.js';
 import {
   DeliveryShape,
@@ -25,9 +25,23 @@ import {
 /** Discover bills; summaries expose IDs for selected complete scrutiny records. */
 export const ukparlSearchBills = tool('ukparl_search_bills', {
   description:
-    'Search Westminster bill summaries by title, House, session, sponsoring member, reference stage or bill type. Use ukparl_lookup_reference for stage/type IDs and ukparl_get_bill for complete selected records. No session or date scope is inferred. Follow collection cursors with the same filters; use contentCursor to reconstruct an oversized item.',
+    'Search Westminster bill summaries by title, current or originating House, session, sponsoring member, department, reference stage, bill type or status, with optional official ordering. Use ukparl_lookup_reference for stage/type/department IDs and ukparl_get_bill for complete selected records. Department IDs are distinct from answering-body IDs. inAmendableStage=true restricts to amendable stages; false is unrestricted. No session or date scope is inferred. Follow collection cursors with the same filters; use contentCursor to reconstruct an oversized item.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
+    departmentId: optionalText(IdSchema).describe(
+      'Members department ID from ukparl_lookup_reference topic=departments; distinct from answering-body IDs.',
+    ),
+    sortOrder: optionalText(BillSortOrderSchema).describe(
+      'Official ordering; omission preserves the source default.',
+    ),
+    originatingHouse: optionalText(HouseSchema).describe(
+      'Originating Commons or Lords House; omission includes all.',
+    ),
+    isDefeated: optionalText(z.boolean()).describe('Filter by defeated state, including false.'),
+    isWithdrawn: optionalText(z.boolean()).describe('Filter by withdrawn state, including false.'),
+    inAmendableStage: optionalText(z.boolean()).describe(
+      'True restricts to amendable stages; false applies no restriction.',
+    ),
     query: optionalText(z.string().trim().min(1)).describe('Bill title search text.'),
     house: optionalText(HouseSchema).describe('Current Commons or Lords House.'),
     sessionId: optionalText(IdSchema).describe('Session identifier discovered in bill records.'),
@@ -76,6 +90,15 @@ export const ukparlSearchBills = tool('ukparl_search_bills', {
         memberId: z.string().optional().describe('Applied member ID.'),
         stageIds: z.array(z.string()).optional().describe('Applied reference stages.'),
         billTypeIds: z.array(z.string()).optional().describe('Applied bill types.'),
+        departmentId: z.string().optional().describe('Applied Members department ID.'),
+        sortOrder: BillSortOrderSchema.optional().describe('Applied official ordering.'),
+        originatingHouse: z.string().optional().describe('Applied originating House.'),
+        isDefeated: z.boolean().optional().describe('Applied defeated filter.'),
+        isWithdrawn: z.boolean().optional().describe('Applied withdrawn filter.'),
+        inAmendableStage: z
+          .boolean()
+          .optional()
+          .describe('Supplied amendable-stage selection; false is unrestricted.'),
         source: z.literal('bills').describe('Official Bills API.'),
         limit: z.number().int().describe('Effective bill limit.'),
       })

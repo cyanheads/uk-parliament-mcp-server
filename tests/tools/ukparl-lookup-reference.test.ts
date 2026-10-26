@@ -19,6 +19,7 @@ import {
   initParliamentHttp,
 } from '@/services/parliament-http/parliament-http-service.js';
 import { LICENCE_NOTICE, LICENCE_URL } from '@/services/parliament-http/parliament-models.js';
+import { renderedPayload } from './rendered-payload.js';
 
 function installReference(route: (url: URL) => unknown | Response) {
   const requests: URL[] = [];
@@ -68,6 +69,10 @@ describe('ukparl_lookup_reference static guides', () => {
       'DebateSectionExtId',
       'inquiries',
       'publication',
+      'evidence_detail',
+      'evidenceType',
+      'ukparl_search_bills.departmentId',
+      'candidates across sessions',
       'sessionDiscovery',
       'Open Parliament Licence',
     ])
@@ -129,6 +134,9 @@ describe('ukparl_lookup_reference static guides', () => {
       });
       expect(text(result)).toContain('topic=identifiers');
       expect(text(result)).toContain('invalid_mode_arguments');
+      expect(text(result)).toContain(
+        `topic=identifiers does not accept ${Object.keys(fields).join(', ')}; remove`,
+      );
     },
   );
 
@@ -142,6 +150,27 @@ describe('ukparl_lookup_reference static guides', () => {
       error: { code: JsonRpcErrorCode.InvalidParams, data: { reason: 'invalid_cursor' } },
     });
     expect(text(result)).toContain('same filters and no cursor or contentCursor');
+  });
+
+  it('reports all static-topic conflicts in field order without I/O', async () => {
+    const requests = installReference(() => []);
+    const result = await runToolContract(ukparlLookupReference, {
+      topic: 'coverage',
+      house: 'commons',
+      nameContains: 'x',
+      cursor: 'x',
+    });
+    const message =
+      'topic=coverage does not accept house, nameContains, cursor; remove these fields to read the static guide.';
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.InvalidParams,
+        message,
+        data: { reason: 'invalid_mode_arguments' },
+      },
+    });
+    expect(text(result)).toContain(message);
+    expect(requests).toEqual([]);
   });
 
   it('renders source-change recovery on both surfaces for a stale content revision', async () => {
@@ -213,15 +242,7 @@ describe('ukparl_lookup_reference live directories', () => {
       const result = await runToolContract(ukparlLookupReference, { ...input, contentCursor });
       expect(result.isError).not.toBe(true);
       expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(24000);
-      const encoded = [...text(result).matchAll(/(`{3,})json\n([^\n]*)\n\1/g)].map((match) =>
-        JSON.parse(match[2]!),
-      );
-      const visit = (value: unknown): void => {
-        if (value !== null && typeof value === 'object')
-          for (const child of Object.values(value)) visit(child);
-        else expect(encoded).toContainEqual(value);
-      };
-      visit(result.structuredContent);
+      expect(renderedPayload(text(result))).toEqual(result.structuredContent);
       const output = ukparlLookupReference.output.parse(result.structuredContent);
       expect(output.provenance).toMatchObject({
         api: 'members',
@@ -242,15 +263,24 @@ describe('ukparl_lookup_reference live directories', () => {
       offset: 0,
       totalCodeUnits: 300002,
       hasMore: true,
-      fragment: JSON.stringify(nameContains).slice(0, 2000),
     });
+    expect(fragment.fragment!.length).toBeGreaterThan(2000);
+    expect(fragment.fragment).toBe(
+      JSON.stringify(nameContains).slice(0, fragment.fragment!.length),
+    );
     const next = (await run(fragment.nextCursor!)).contentPage!;
     expect(next).toMatchObject({
-      offset: 2000,
+      offset: fragment.fragment!.length,
       totalCodeUnits: 300002,
       hasMore: true,
-      fragment: JSON.stringify(nameContains).slice(2000, 4000),
     });
+    expect(next.fragment!.length).toBeGreaterThan(2000);
+    expect(next.fragment).toBe(
+      JSON.stringify(nameContains).slice(
+        fragment.fragment!.length,
+        fragment.fragment!.length + next.fragment!.length,
+      ),
+    );
     expect(requests).toHaveLength(3);
   });
 
@@ -270,9 +300,9 @@ describe('ukparl_lookup_reference live directories', () => {
       ],
       page: { returned: 3, total: 3, hasMore: false },
     });
-    expect(text(result)).toContain('/items/0/id\n```json\n"7"');
-    expect(text(result)).toContain('/items/1/id\n```json\n"7"');
-    expect(text(result)).toContain('/items/2/id\n```json\n"8"');
+    expect(renderedPayload(text(result))).toMatchObject({
+      items: [{ id: '7' }, { id: '7' }, { id: '8' }],
+    });
   });
 
   it.each(['bill_stages', 'bill_types'] as const)(
@@ -487,6 +517,11 @@ describe('ukparl_lookup_reference live directories', () => {
       error: { data: { reason: 'invalid_mode_arguments' } },
     });
     expect(text(result)).toContain('topic=identifiers');
+    expect(text(result)).toContain(
+      input.topic === 'parties'
+        ? 'topic=parties requires house; set house=commons or house=lords.'
+        : `topic=${input.topic} does not accept house; remove house`,
+    );
     expect(requests).toHaveLength(0);
   });
 
@@ -519,7 +554,7 @@ describe('ukparl_lookup_reference live directories', () => {
       items: [],
       page: { returned: 0, total: 2, hasMore: false },
     });
-    expect(text(past)).toContain('/items\n[]');
+    expect(renderedPayload(text(past))).toMatchObject({ items: [] });
   });
 
   it('binds collection cursors to topic, House, filter and effective limit before I/O', async () => {
@@ -661,15 +696,7 @@ describe('ukparl_lookup_reference live directories', () => {
       expect(result.isError).not.toBe(true);
       expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(24_000);
       const output = ukparlLookupReference.output.parse(result.structuredContent);
-      const encoded = [...text(result).matchAll(/(`{3,})json\n([^\n]*)\n\1/g)].map((match) =>
-        JSON.parse(match[2]!),
-      );
-      const check = (node: unknown): void => {
-        if (node !== null && typeof node === 'object')
-          for (const value of Object.values(node)) check(value);
-        else expect(encoded).toContainEqual(node);
-      };
-      check(result.structuredContent);
+      expect(renderedPayload(text(result))).toEqual(result.structuredContent);
       return output;
     };
     const first = await run();

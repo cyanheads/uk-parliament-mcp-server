@@ -38,7 +38,7 @@ const SelectionSchema = z.object({
     'Division title or number search text; search mode only.',
   ),
   memberId: optionalText(IdSchema).describe(
-    'Members API ID; search includes divisions where this member was a teller.',
+    "Members API ID; search returns this member's recorded lobby and teller flag, including divisions where they were a teller.",
   ),
   divisionId: optionalText(IdSchema).describe(
     'Division ID in the selected House; required outside search.',
@@ -63,7 +63,7 @@ const SelectionSchema = z.object({
 /** Search division summaries or select complete metadata, voter rows and party totals. */
 export const ukparlSearchDivisions = tool('ukparl_search_divisions', {
   description:
-    'Search official Commons or Lords division summaries, or use detail, voters or party_totals with a divisionId from the same House. Search supports title/number text, member and inclusive division dates; member searches include teller participation. Detail preserves complete metadata and teller identities, with roster selectors for voters mode. Voters can filter exact source party labels and House-compatible lobbies. not_recorded means only the source list, never abstention. Party totals count listed non-tellers and tellers separately from official headline counts. Follow collection cursors with unchanged filters; reconstruct oversized content using contentCursor.',
+    'Search official Commons or Lords division summaries, or use detail, voters or party_totals with a divisionId from the same House. Search supports title/number text, member and inclusive division dates; member searches include memberVote with the recorded House-native lobby and teller flag. Detail preserves complete metadata and teller identities, with roster selectors for voters mode. Voters can filter exact source party labels and House-compatible lobbies. not_recorded means only the source list, never abstention. Party totals count listed non-tellers and tellers separately from official headline counts. Follow collection cursors with unchanged filters; reconstruct oversized content using contentCursor.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: SelectionSchema.extend({
     mode: z
@@ -256,22 +256,43 @@ export const ukparlSearchDivisions = tool('ukparl_search_divisions', {
     },
   ],
   async handler(input, ctx) {
-    const searchFilters = [input.query, input.memberId, input.startDate, input.endDate].some(
-      (value) => value !== undefined,
-    );
-    if (
-      (input.mode === 'search' && input.divisionId !== undefined) ||
-      (input.mode !== 'search' && (input.divisionId === undefined || searchFilters)) ||
-      (input.mode !== 'voters' && (input.party !== undefined || input.lobby !== undefined)) ||
-      ((input.mode === 'detail' || input.mode === 'party_totals') &&
-        (input.cursor !== undefined || input.limit !== undefined)) ||
-      (input.lobby !== undefined &&
-        !(
-          input.house === 'commons' ? ['aye', 'no', 'not_recorded'] : ['content', 'not_content']
-        ).includes(input.lobby))
-    ) {
-      throw ctx.fail('invalid_mode', 'Use compatible division mode, House and filters.');
+    const conflicts: string[] = [];
+    if (input.mode === 'search' && input.divisionId !== undefined)
+      conflicts.push(
+        'mode=search does not accept divisionId; omit it or select detail, voters or party_totals.',
+      );
+    if (input.mode !== 'search') {
+      if (input.divisionId === undefined)
+        conflicts.push(`mode=${input.mode} requires divisionId; select an ID from search results.`);
+      const fields = (['query', 'memberId', 'startDate', 'endDate'] as const).filter(
+        (field) => input[field] !== undefined,
+      );
+      if (fields.length)
+        conflicts.push(
+          `mode=${input.mode} does not accept ${fields.join(', ')}; remove these fields or use mode=search.`,
+        );
     }
+    if (input.mode !== 'voters') {
+      const fields = (['party', 'lobby'] as const).filter((field) => input[field] !== undefined);
+      if (fields.length)
+        conflicts.push(
+          `mode=${input.mode} does not accept ${fields.join(', ')}; remove these fields or use mode=voters.`,
+        );
+    }
+    if (input.mode === 'detail' || input.mode === 'party_totals') {
+      const fields = (['cursor', 'limit'] as const).filter((field) => input[field] !== undefined);
+      if (fields.length)
+        conflicts.push(
+          `mode=${input.mode} does not accept ${fields.join(', ')}; omit collection pagination.`,
+        );
+    }
+    const lobbies =
+      input.house === 'commons' ? ['aye', 'no', 'not_recorded'] : ['content', 'not_content'];
+    if (input.lobby !== undefined && !lobbies.includes(input.lobby))
+      conflicts.push(
+        `lobby=${input.lobby} is incompatible with house=${input.house}; use ${input.house === 'commons' ? 'aye, no or not_recorded' : 'content or not_content'}.`,
+      );
+    if (conflicts.length) throw ctx.fail('invalid_mode', conflicts.join(' '));
     validateDateRange(input.startDate, input.endDate);
     const requested = input.limit ?? (input.mode === 'search' ? 5 : 20);
     const limit = Math.min(requested, input.mode === 'search' ? 10 : 50);

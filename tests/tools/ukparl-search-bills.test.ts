@@ -11,6 +11,7 @@ import { digest, encodeCursor } from '@/services/parliament-http/parliament-curs
 import { disposeParliamentHttp } from '@/services/parliament-http/parliament-http-service.js';
 import { LICENCE_NOTICE } from '@/services/parliament-http/parliament-models.js';
 import { bill, installBills, page, withFullBillsQueue } from '../services/bills/bills-fixtures.js';
+import { renderedPayload } from './rendered-payload.js';
 
 function text(result: Awaited<ReturnType<typeof runToolContract>>) {
   return result.content
@@ -25,6 +26,186 @@ afterEach(() => {
 });
 
 describe('ukparl_search_bills', () => {
+  it('pages the filtered search total and keeps an explicit past-end result and capped request', async () => {
+    const rows = [bill(11), bill(12), bill(13)];
+    const requests = installBills((url) =>
+      page(
+        rows.slice(
+          Number(url.searchParams.get('Skip')),
+          Number(url.searchParams.get('Skip')) + Number(url.searchParams.get('Take')),
+        ),
+        3,
+      ),
+    );
+    const selection = {
+      departmentId: '50',
+      originatingHouse: 'commons',
+      sortOrder: 'TitleDescending',
+      inAmendableStage: false,
+      limit: 2,
+    };
+    const first = await runToolContract(ukparlSearchBills, selection);
+    const output = ukparlSearchBills.output.parse(first.structuredContent);
+    const last = await runToolContract(ukparlSearchBills, {
+      ...selection,
+      cursor: output.page!.nextCursor!,
+    });
+    expect(last.structuredContent).toMatchObject({
+      items: [{ billId: '13' }],
+      page: { returned: 1, total: 3, hasMore: false },
+    });
+    expect(text(last)).toContain('13');
+    const cursor = encodeCursor({
+      v: 1,
+      source: 'bills',
+      selector: 'search',
+      filters: digest({
+        departmentId: '50',
+        originatingHouse: 'commons',
+        sortOrder: 'TitleDescending',
+        inAmendableStage: false,
+      }),
+      offset: 99,
+      nativePageSize: 2,
+    });
+    const empty = await runToolContract(ukparlSearchBills, { ...selection, cursor });
+    expect(empty.structuredContent).toMatchObject({
+      items: [],
+      page: { returned: 0, total: 3, hasMore: false },
+    });
+    expect(renderedPayload(text(empty))).toMatchObject({ page: { hasMore: false } });
+    const capped = await runToolContract(ukparlSearchBills, { ...selection, limit: 100 });
+    expect(capped.structuredContent).toMatchObject({ applied: { limit: 20 }, requestedLimit: 100 });
+    expect(requests.at(-1)!.searchParams.get('Take')).toBe('20');
+    expect(
+      requests.every(
+        (url) =>
+          url.searchParams.get('DepartmentId') === '50' &&
+          url.searchParams.get('IsInAmendableStage') === 'false',
+      ),
+    ).toBe(true);
+  });
+  it.each([
+    { departmentId: '50' },
+    { sortOrder: 'TitleDescending' },
+    { originatingHouse: 'Commons' },
+    { isDefeated: false },
+    { isWithdrawn: false },
+    { inAmendableStage: false },
+  ])('binds both continuations to new selection %j', async (changed) => {
+    let title = 'Synthetic title';
+    const requests = installBills(() => page([bill(11, title)], 2));
+    const first = await runToolContract(ukparlSearchBills, { limit: 1 });
+    const output = ukparlSearchBills.output.parse(first.structuredContent);
+    const cursor = output.page!.nextCursor!;
+    title = 'Full title '.repeat(5000);
+    const oversized = await runToolContract(ukparlSearchBills, { limit: 1 });
+    const contentCursor = ukparlSearchBills.output.parse(oversized.structuredContent).contentPage!
+      .entries![0]!.contentCursor;
+    const before = requests.length;
+    const rebound = await runToolContract(ukparlSearchBills, { limit: 1, ...changed, cursor });
+    expect(rebound.structuredContent).toMatchObject({
+      error: { data: { reason: 'invalid_cursor' } },
+    });
+    expect(text(rebound)).toContain('same filters and no cursor or contentCursor');
+    expect(requests).toHaveLength(before);
+    const content = await runToolContract(ukparlSearchBills, {
+      limit: 1,
+      ...changed,
+      contentCursor,
+    });
+    expect(content.structuredContent).toMatchObject({
+      error: { data: { reason: 'invalid_cursor' } },
+    });
+    expect(text(content)).toContain('same filters and no cursor or contentCursor');
+  });
+
+  it.each(['TitleAscending', 'TitleDescending', 'DateUpdatedAscending', 'DateUpdatedDescending'])(
+    'supports official order %s and blank optional selectors',
+    async (sortOrder) => {
+      const requests = installBills(() => page([]));
+      const result = await runToolContract(ukparlSearchBills, {
+        sortOrder,
+        departmentId: ' ',
+        originatingHouse: '',
+        isDefeated: '',
+        isWithdrawn: '',
+        inAmendableStage: '',
+      });
+      expect(result.structuredContent).toMatchObject({
+        items: [],
+        applied: { sortOrder },
+        page: { total: 0, hasMore: false },
+      });
+      expect(requests[0]!.searchParams.get('SortOrder')).toBe(sortOrder);
+      expect(requests[0]!.searchParams.has('DepartmentId')).toBe(false);
+      expect(requests[0]!.searchParams.has('OriginatingHouse')).toBe(false);
+      expect(requests[0]!.searchParams.has('IsDefeated')).toBe(false);
+      expect(requests[0]!.searchParams.has('IsWithdrawn')).toBe(false);
+      expect(requests[0]!.searchParams.has('IsInAmendableStage')).toBe(false);
+      expect(text(result)).toContain(sortOrder);
+    },
+  );
+
+  it.each([
+    { departmentId: '0' },
+    { sortOrder: 'Newest' },
+    { originatingHouse: 'All' },
+    { isWithdrawn: 'maybe' },
+    { isDefeated: 'maybe' },
+    { inAmendableStage: 'maybe' },
+  ])('rejects invalid direct filters %j before I/O', async (input) => {
+    const requests = installBills(() => page([]));
+    const result = await runToolContract(ukparlSearchBills, input);
+    expect(result.isError).toBe(true);
+    expect(requests).toHaveLength(0);
+  });
+  it.each([true, false])(
+    'forwards direct search filters, including boolean %s, on both surfaces',
+    async (flag) => {
+      const requests = installBills(() => page([bill()], 2));
+      const result = await runToolContract(ukparlSearchBills, {
+        departmentId: '0050',
+        sortOrder: 'DateUpdatedDescending',
+        originatingHouse: 'House of Lords',
+        isDefeated: flag,
+        isWithdrawn: flag,
+        inAmendableStage: flag,
+        limit: 1,
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        applied: {
+          departmentId: '50',
+          sortOrder: 'DateUpdatedDescending',
+          originatingHouse: 'lords',
+          isDefeated: flag,
+          isWithdrawn: flag,
+          inAmendableStage: flag,
+        },
+        page: { total: 2, returned: 1, hasMore: true },
+      });
+      expect([...requests[0]!.searchParams]).toEqual([
+        ['DepartmentId', '50'],
+        ['SortOrder', 'DateUpdatedDescending'],
+        ['OriginatingHouse', 'Lords'],
+        ['IsDefeated', String(flag)],
+        ['IsWithdrawn', String(flag)],
+        ['IsInAmendableStage', String(flag)],
+        ['Skip', '0'],
+        ['Take', '1'],
+      ]);
+      for (const field of [
+        'departmentId',
+        'sortOrder',
+        'originatingHouse',
+        'isDefeated',
+        'isWithdrawn',
+        'inAmendableStage',
+      ])
+        expect(text(result)).toContain(field);
+    },
+  );
   it.each([{ items: [] }, { items: null }])(
     'rejects non-advancing empty Bills search pages $items before the advertised total',
     async ({ items }) => {
@@ -61,7 +242,7 @@ describe('ukparl_search_bills', () => {
       expect(ukparlSearchBills.output.parse(result.structuredContent).page).not.toHaveProperty(
         'nextCursor',
       );
-      expect(text(result)).toContain('/page/hasMore\n```json\nfalse');
+      expect(renderedPayload(text(result))).toMatchObject({ page: { hasMore: false } });
     },
   );
 
@@ -105,12 +286,15 @@ describe('ukparl_search_bills', () => {
     for (const term of [
       'Synthetic',
       'unassigned',
-      '/stageSittings/1/id',
+      'stageSittings',
       '202',
       LICENCE_NOTICE,
       'https://bills-api.parliament.uk/api/v1/Bills',
     ])
       expect(text(result)).toContain(term);
+    expect(renderedPayload(text(result))).toMatchObject({
+      items: [{ currentStage: { stageSittings: [{ id: '201' }, { id: '202' }] } }],
+    });
   });
 
   it('keeps omitted sparse fields absent and explicit nulls unknown on both surfaces', async () => {
@@ -122,7 +306,7 @@ describe('ukparl_search_bills', () => {
     });
     const output = ukparlSearchBills.output.parse(result.structuredContent);
     expect(output.items?.[0]).not.toHaveProperty('currentHouse');
-    expect(text(result)).toContain('/items/0/isAct\n```json\nnull');
+    expect(renderedPayload(text(result))).toMatchObject({ items: [{ isAct: null }] });
     expect(requests[0]?.searchParams.has('Session')).toBe(false);
   });
 

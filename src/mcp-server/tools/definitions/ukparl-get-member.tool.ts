@@ -355,13 +355,24 @@ export const ukparlGetMember = tool('ukparl_get_member', {
     const needsHouse = input.section === 'interests' || voting;
     const collection =
       input.section !== 'profile' && !(input.section === 'roles' && !input.category);
-    if (
-      (needsHouse && !input.house) ||
-      (!needsHouse && input.house) ||
-      (input.category && input.section !== 'roles') ||
-      (!collection && input.cursor)
-    )
-      throw ctx.fail('invalid_mode_arguments', 'Use selectors supported by this member section.');
+    const conflicts: string[] = [];
+    if (needsHouse && !input.house)
+      conflicts.push(`section=${input.section} requires house=commons or house=lords.`);
+    if (!needsHouse && input.house)
+      conflicts.push(
+        `house is unsupported for section=${input.section}; omit house or select interests or voting.`,
+      );
+    if (input.category && input.section !== 'roles')
+      conflicts.push(
+        `category is unsupported for section=${input.section}; omit category or select roles.`,
+      );
+    if (!collection && input.cursor)
+      conflicts.push(
+        input.section === 'roles'
+          ? 'cursor is unsupported for section=roles without category; select a category or omit cursor.'
+          : 'cursor is unsupported for section=profile; omit cursor.',
+      );
+    if (conflicts.length) throw ctx.fail('invalid_mode_arguments', conflicts.join(' '));
     const selection = {
       memberId: input.memberId,
       section: input.section,

@@ -14,10 +14,7 @@ import {
   PartySchema,
 } from '@/services/members/member-models.js';
 import { getMembers } from '@/services/members/members-service.js';
-import {
-  advanceCollectionCursor,
-  readCollectionCursor,
-} from '@/services/parliament-http/parliament-cursors.js';
+import { pageFor, readCollectionCursor } from '@/services/parliament-http/parliament-cursors.js';
 import {
   DeliveryShape,
   deliverPayload,
@@ -126,14 +123,15 @@ const identifiers: z.infer<typeof IdentifiersSchema> = {
       namespace: 'questionId',
       format: 'Positive int32 decimal string.',
       discovery: 'ukparl_search_questions mode=search',
-      distinction: 'A question UIN alone is not an ID; date is needed to resolve a UIN.',
+      distinction:
+        'A question UIN is not a questionId. Search with uin and optional tabledFrom/tabledTo to find candidates across sessions; use returned questionId for detail.',
     },
     {
-      namespace: 'committeeId, businessId and publicationId',
+      namespace: 'committeeId, businessId, publicationId and evidenceId',
       format: 'Positive int32 decimal strings.',
       discovery: 'ukparl_get_committee mode=search and its returned collections',
       distinction:
-        'Committee person IDs and internal membership IDs are not Members API member IDs.',
+        'Committee person IDs and internal membership IDs are not Members API member IDs. Written and oral evidence IDs are separate namespaces selected by evidenceType.',
     },
     {
       namespace: 'Hansard external contribution/debate IDs',
@@ -146,7 +144,7 @@ const identifiers: z.infer<typeof IdentifiersSchema> = {
       format: 'Positive int32 decimal strings.',
       discovery: 'ukparl_lookup_reference matching topic',
       distinction:
-        'Answering bodies are not departments. Active parties are not an exhaustive historical party directory.',
+        'Department IDs from topic=departments filter ukparl_search_bills.departmentId; answeringBodyId filters written questions and is a separate namespace. Active parties are not an exhaustive historical party directory.',
     },
   ],
   modes: [
@@ -179,6 +177,8 @@ const identifiers: z.infer<typeof IdentifiersSchema> = {
         'inquiry',
         'publications',
         'publication',
+        'evidence',
+        'evidence_detail',
       ],
     },
   ],
@@ -383,14 +383,23 @@ export const ukparlLookupReference = tool('ukparl_lookup_reference', {
   async handler(input, ctx) {
     const limit = Math.min(input.limit, 20);
     const isStatic = input.topic === 'identifiers' || input.topic === 'coverage';
-    if (
-      (isStatic && (input.house || input.nameContains || input.cursor)) ||
-      (input.topic === 'parties' && !input.house) ||
-      (input.topic !== 'parties' && input.house)
-    )
+    const staticConflicts = (['house', 'nameContains', 'cursor'] as const).filter(
+      (field) => input[field],
+    );
+    if (isStatic && staticConflicts.length)
       throw ctx.fail(
         'invalid_mode_arguments',
-        'Static topics accept no House, nameContains or collection cursor. House is required only for parties and is unsupported on other topics.',
+        `topic=${input.topic} does not accept ${staticConflicts.join(', ')}; remove these fields to read the static guide.`,
+      );
+    if (input.topic === 'parties' && !input.house)
+      throw ctx.fail(
+        'invalid_mode_arguments',
+        'topic=parties requires house; set house=commons or house=lords.',
+      );
+    if (input.topic !== 'parties' && input.house)
+      throw ctx.fail(
+        'invalid_mode_arguments',
+        `topic=${input.topic} does not accept house; remove house or use topic=parties for active parties by House.`,
       );
     const nameContains = input.nameContains?.toLowerCase().split(/\s+/).sort().join(' ');
     const applied = {
@@ -398,10 +407,7 @@ export const ukparlLookupReference = tool('ukparl_lookup_reference', {
       ...(input.house ? { house: input.house } : {}),
       ...(nameContains ? { nameContainsLocation: '/nameContains' as const } : {}),
       limit,
-      source:
-        input.topic === 'identifiers' || input.topic === 'coverage'
-          ? 'static_official_source_guide'
-          : 'official_reference_api',
+      source: isStatic ? 'static_official_source_guide' : 'official_reference_api',
     };
     let notice = `${LICENCE_NOTICE}${input.limit > 20 ? ` Requested limit ${input.limit} is capped at 20 reference rows.` : ''}`;
     const enrichment = {
@@ -436,7 +442,11 @@ export const ukparlLookupReference = tool('ukparl_lookup_reference', {
       items = result.items;
       sources = result.sources;
     } else if (input.topic === 'parties') {
-      if (!input.house) throw ctx.fail('invalid_mode_arguments');
+      if (!input.house)
+        throw ctx.fail(
+          'invalid_mode_arguments',
+          'topic=parties requires house; set house=commons or house=lords.',
+        );
       const result = await getMembers().parties(call, input.house);
       if (!result.items)
         throw validationError('Active-party source omitted its complete items collection.');
@@ -476,18 +486,12 @@ export const ukparlLookupReference = tool('ukparl_lookup_reference', {
         ' No matches. Repeat ukparl_lookup_reference with the same topic and no nameContains filter.';
     const page = (count: number) => {
       const selected = filtered.slice(cursor.offset, cursor.offset + count);
-      const hasMore = cursor.offset + selected.length < filtered.length;
       return {
         topic: input.topic,
         ...(nameContains ? { nameContains } : {}),
         items: selected,
         sources,
-        page: {
-          returned: selected.length,
-          total: filtered.length,
-          hasMore,
-          ...(hasMore ? { nextCursor: advanceCollectionCursor(cursor, selected.length) } : {}),
-        },
+        page: pageFor(cursor, selected.length, filtered.length),
       };
     };
     const payload = page(limit);

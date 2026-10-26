@@ -5,8 +5,8 @@
 import type { z } from '@cyanheads/mcp-ts-core';
 import { validationError } from '@cyanheads/mcp-ts-core/errors';
 import {
-  advanceCollectionCursor,
   invalidCursor,
+  pageFor,
   readCollectionCursor,
 } from '../parliament-http/parliament-cursors.js';
 import {
@@ -14,12 +14,7 @@ import {
   type ParliamentCall,
   type ParliamentHttpService,
 } from '../parliament-http/parliament-http-service.js';
-import {
-  type House,
-  type Page,
-  type Source,
-  validateDateRange,
-} from '../parliament-http/parliament-models.js';
+import type { House, Source } from '../parliament-http/parliament-models.js';
 import {
   HansardItemSchema,
   type RawHansardItemSchema,
@@ -47,10 +42,7 @@ function normalize(raw: z.infer<typeof RawHansardItemSchema>, source: Source) {
     DebateSectionId,
     ...rest
   } = raw;
-  const full =
-    ContributionTextFull !== null &&
-    ContributionTextFull !== undefined &&
-    ContributionTextFull.length > 0;
+  const full = Boolean(ContributionTextFull);
   return HansardItemSchema.parse({
     itemId: String(ItemId),
     contributionExtId: ContributionExtId,
@@ -104,7 +96,6 @@ export class HansardService {
 
   /** Search Spoken contributions without claiming this is a complete debate transcript. */
   async search(input: HansardSearchInput, call: ParliamentCall) {
-    validateDateRange(input.startDate, input.endDate);
     const { cursor: cursorText, limit, ...filters } = input;
     const cursor = readCollectionCursor(cursorText, {
       source: 'hansard',
@@ -112,11 +103,7 @@ export class HansardService {
       filters,
       nativePageSize: limit,
     });
-    if (
-      cursor.nativePage !== undefined ||
-      cursor.intraPageOffset !== undefined ||
-      cursor.offset > 2147483647
-    )
+    if (cursor.nativePage !== undefined || cursor.intraPageOffset !== undefined)
       return invalidCursor();
     const query = {
       'queryParameters.searchTerm': input.query,
@@ -145,35 +132,25 @@ export class HansardService {
         { retryable: false },
       );
     const items = result.data.Results.map((raw) => normalize(raw, result.source));
-    const repage = (count: number) => {
-      const page: Page = {
-        returned: count,
-        total: result.data.TotalResultCount,
-        hasMore: cursor.offset + count < result.data.TotalResultCount,
-        ...(cursor.offset + count < result.data.TotalResultCount
-          ? { nextCursor: advanceCollectionCursor(cursor, count) }
-          : {}),
-      };
-      return {
-        ...(input.query ? { query: input.query } : {}),
-        source: result.source,
-        items: items.slice(0, count),
-        page,
-        ...(result.data.SearchTerms !== undefined ? { searchTerms: result.data.SearchTerms } : {}),
-        ...(result.data.SpokenResultCount !== undefined
-          ? { spokenResultCount: result.data.SpokenResultCount }
-          : {}),
-        ...(result.data.WrittenResultCount !== undefined
-          ? { writtenResultCount: result.data.WrittenResultCount }
-          : {}),
-        ...(result.data.CorrectionsResultCount !== undefined
-          ? { correctionsResultCount: result.data.CorrectionsResultCount }
-          : {}),
-        ...(result.data.DivisionsResultCount !== undefined
-          ? { divisionsResultCount: result.data.DivisionsResultCount }
-          : {}),
-      };
-    };
+    const repage = (count: number) => ({
+      ...(input.query ? { query: input.query } : {}),
+      source: result.source,
+      items: items.slice(0, count),
+      page: pageFor(cursor, count, result.data.TotalResultCount),
+      ...(result.data.SearchTerms !== undefined ? { searchTerms: result.data.SearchTerms } : {}),
+      ...(result.data.SpokenResultCount !== undefined
+        ? { spokenResultCount: result.data.SpokenResultCount }
+        : {}),
+      ...(result.data.WrittenResultCount !== undefined
+        ? { writtenResultCount: result.data.WrittenResultCount }
+        : {}),
+      ...(result.data.CorrectionsResultCount !== undefined
+        ? { correctionsResultCount: result.data.CorrectionsResultCount }
+        : {}),
+      ...(result.data.DivisionsResultCount !== undefined
+        ? { divisionsResultCount: result.data.DivisionsResultCount }
+        : {}),
+    });
     return { payload: repage(items.length), count: items.length, repage };
   }
 }

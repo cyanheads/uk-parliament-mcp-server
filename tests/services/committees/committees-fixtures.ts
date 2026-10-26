@@ -279,6 +279,47 @@ export function publication() {
     ],
   };
 }
+/** Written and oral namespaces share witnesses/documents, with distinct business relationships. */
+export function evidence(type: 'written' | 'oral') {
+  const shared = {
+    id: 91,
+    publicationDate: null,
+    witnesses: [
+      {
+        id: 92,
+        personId: 800,
+        name: 'Synthetic witness',
+        memberInfo: { mnisId: 99 },
+        organisations: [{ name: 'Synthetic organisation', role: null }],
+        submitterType: 'Person',
+        additionalContext: '<p>Exact source HTML</p>',
+      },
+      { id: 93, memberInfo: null, organisations: null },
+    ],
+    document: report().documents[0],
+    committees: [committee()],
+    legacyHtmlUrl: null,
+    legacyPdfUrl: 'https://example.test/evidence.pdf',
+  };
+  return type === 'written'
+    ? {
+        ...shared,
+        submissionId: '00000000-0000-0000-0000-000000000001',
+        internalReference: 'TEST0001',
+        anonymous: false,
+        anonymousWitnessText: null,
+        committeeBusiness: business(),
+        hcNumber: { number: 'HC 10', sessionId: 40 },
+      }
+    : {
+        ...shared,
+        activityId: 81,
+        meetingDate: null,
+        activityStartDate: '2026-01-01T10:00:00',
+        committeeBusinesses: [business(), { id: 32, latestReport: null }],
+        hcNumbers: [{ number: 'HC 10', sessionId: 40 }, { number: null }],
+      };
+}
 /** Native collection shape; null and array absence are distinct source states. */
 export function page(items: unknown[] | null, totalResults = items?.length ?? 0) {
   return {
@@ -296,6 +337,8 @@ export function installCommittees(route: (url: URL) => unknown | Response) {
   const requests: URL[] = [];
   initParliamentHttp({
     exchange: async (url) => {
+      if (url.origin !== 'https://committees-api.parliament.uk')
+        throw new Error(`Unexpected fixture origin ${url.origin}`);
       requests.push(new URL(url));
       const body = route(url);
       return body instanceof Response ? body : Response.json(body);

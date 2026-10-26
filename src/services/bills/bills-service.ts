@@ -3,27 +3,19 @@
  * @module services/bills/bills-service
  */
 import { z } from '@cyanheads/mcp-ts-core';
-import {
-  invalidParams,
-  JsonRpcErrorCode,
-  McpError,
-  validationError,
-} from '@cyanheads/mcp-ts-core/errors';
-import {
-  advanceCollectionCursor,
-  invalidCursor,
-  readCollectionCursor,
-} from '../parliament-http/parliament-cursors.js';
+import { invalidParams, validationError } from '@cyanheads/mcp-ts-core/errors';
+import { pageFor, readCollectionCursor } from '../parliament-http/parliament-cursors.js';
 import {
   getParliamentHttp,
   type ParliamentCall,
   type ParliamentHttpService,
-  type ParliamentResponse,
 } from '../parliament-http/parliament-http-service.js';
 import type { House, Link, Source } from '../parliament-http/parliament-models.js';
 import {
+  type AmendmentDecisionSchema,
   BillHitSchema,
   type BillSectionSchema,
+  type BillSortOrderSchema,
   Bills,
   billsPage,
   GetBillOutputSchema,
@@ -35,26 +27,43 @@ import {
 export interface SearchBillsInput {
   billTypeIds?: string[] | undefined;
   cursor?: string | undefined;
+  departmentId?: string | undefined;
   house?: House | undefined;
+  inAmendableStage?: boolean | undefined;
+  isDefeated?: boolean | undefined;
+  isWithdrawn?: boolean | undefined;
   limit: number;
   memberId?: string | undefined;
+  originatingHouse?: House | undefined;
   query?: string | undefined;
   sessionId?: string | undefined;
+  sortOrder?: z.infer<typeof BillSortOrderSchema> | undefined;
   stageIds?: string[] | undefined;
 }
 /** Selected bill section with bill-specific stage and item identifiers. */
 export interface GetBillInput {
+  amendmentNumber?: string | undefined;
   billId: string;
   billStageId?: string | undefined;
   cursor?: string | undefined;
+  decision?: z.infer<typeof AmendmentDecisionSchema> | undefined;
   itemId?: string | undefined;
   limit?: number | undefined;
+  memberId?: string | undefined;
   section: z.infer<typeof BillSectionSchema>;
 }
 /** A full reference set and all request provenance, ready for local filtering. */
 export interface BillsReferenceSet {
   items: z.infer<typeof Bills.reference>[];
   sources: Source[];
+}
+/** Only an HTTPS legislation.gov.uk URL establishes a statute handoff. */
+function isLegislationUrl(value: string): boolean {
+  const url = URL.parse(value);
+  return (
+    url?.protocol === 'https:' &&
+    (url.hostname === 'legislation.gov.uk' || url.hostname.endsWith('.legislation.gov.uk'))
+  );
 }
 /** Read selected Bills branches using one caller-owned transport deadline. */
 export class BillsService {
@@ -113,7 +122,6 @@ export class BillsService {
       filters,
       nativePageSize: limit,
     });
-    if (cursor.offset > 2147483647) return invalidCursor();
     const response = await this.http.get(
       call,
       'bills',
@@ -127,6 +135,17 @@ export class BillsService {
         MemberId: input.memberId,
         BillStage: input.stageIds,
         BillType: input.billTypeIds,
+        DepartmentId: input.departmentId,
+        SortOrder: input.sortOrder,
+        OriginatingHouse:
+          input.originatingHouse === undefined
+            ? undefined
+            : input.originatingHouse === 'commons'
+              ? 'Commons'
+              : 'Lords',
+        IsDefeated: input.isDefeated,
+        IsWithdrawn: input.isWithdrawn,
+        IsInAmendableStage: input.inAmendableStage,
         Skip: cursor.offset,
         Take: limit,
       },
@@ -137,6 +156,12 @@ export class BillsService {
         'MemberId',
         'BillStage',
         'BillType',
+        'DepartmentId',
+        'SortOrder',
+        'OriginatingHouse',
+        'IsDefeated',
+        'IsWithdrawn',
+        'IsInAmendableStage',
         'Skip',
         'Take',
       ],
@@ -155,30 +180,9 @@ export class BillsService {
     const repage = (count: number) => ({
       ...(input.query ? { query: input.query } : {}),
       items: rows.slice(0, count),
-      page: {
-        returned: count,
-        total: response.data.totalResults,
-        hasMore: cursor.offset + count < response.data.totalResults,
-        ...(cursor.offset + count < response.data.totalResults
-          ? { nextCursor: advanceCollectionCursor(cursor, count) }
-          : {}),
-      },
+      page: pageFor(cursor, count, response.data.totalResults),
     });
     return { payload: repage(rows.length), repage, count: rows.length };
-  }
-
-  private async entity<T>(
-    call: ParliamentCall,
-    path: string,
-    schema: z.ZodType<T>,
-  ): Promise<ParliamentResponse<T> | undefined> {
-    try {
-      return await this.http.get(call, 'bills', path, schema);
-    } catch (error) {
-      call.signal.throwIfAborted();
-      if (error instanceof McpError && error.code === JsonRpcErrorCode.NotFound) return undefined;
-      throw error;
-    }
   }
 
   /** Retrieve only the selected section; publications are paged locally after complete validation. */
@@ -187,21 +191,40 @@ export class BillsService {
     const collection = ['stages', 'publications', 'amendments', 'motions'].includes(section);
     const needsStage = ['stage', 'amendments', 'amendment', 'motions', 'motion'].includes(section);
     const needsItem = section === 'amendment' || section === 'motion';
-    if (
-      needsStage !== Boolean(input.billStageId) ||
-      needsItem !== Boolean(input.itemId) ||
-      (!collection && (input.cursor !== undefined || input.limit !== undefined))
-    )
-      throw invalidParams(
-        'Use only identifiers and pagination fields for the selected bill section.',
-        { reason: 'invalid_mode_arguments' },
+    const conflicts: string[] = [];
+    if (needsStage !== Boolean(input.billStageId))
+      conflicts.push(
+        needsStage
+          ? `section=${section} requires billStageId; retrieve it with section=stages.`
+          : `billStageId is unsupported for section=${section}; omit billStageId or select stage, amendments, amendment, motions or motion.`,
       );
+    if (needsItem !== Boolean(input.itemId))
+      conflicts.push(
+        needsItem
+          ? `section=${section} requires itemId; retrieve it with section=${section === 'amendment' ? 'amendments' : 'motions'}.`
+          : `itemId is unsupported for section=${section}; omit itemId or select amendment or motion.`,
+      );
+    for (const field of ['cursor', 'limit'] as const)
+      if (!collection && input[field] !== undefined)
+        conflicts.push(
+          `${field} is unsupported for section=${section}; omit ${field} or select stages, publications, amendments or motions.`,
+        );
+    for (const field of ['amendmentNumber', 'decision', 'memberId'] as const)
+      if (section !== 'amendments' && input[field] !== undefined)
+        conflicts.push(
+          `${field} is unsupported for section=${section}; omit ${field} or select amendments.`,
+        );
+    if (conflicts.length)
+      throw invalidParams(conflicts.join(' '), { reason: 'invalid_mode_arguments' });
     const limit = Math.min(input.limit ?? 20, 50);
     const filters = {
       billId: input.billId,
       section,
       ...(input.billStageId ? { billStageId: input.billStageId } : {}),
       ...(input.itemId ? { itemId: input.itemId } : {}),
+      ...(input.amendmentNumber !== undefined ? { amendmentNumber: input.amendmentNumber } : {}),
+      ...(input.decision !== undefined ? { decision: input.decision } : {}),
+      ...(input.memberId !== undefined ? { memberId: input.memberId } : {}),
     };
     const cursor = collection
       ? readCollectionCursor(input.cursor, {
@@ -211,10 +234,9 @@ export class BillsService {
           nativePageSize: limit,
         })
       : undefined;
-    if (cursor && cursor.offset > 2147483647) return invalidCursor();
     const base = `/api/v1/Bills/${input.billId}`;
     const stageBase = `${base}/Stages/${input.billStageId}`;
-    const parent = await this.entity(call, base, RawBills.billDetail);
+    const parent = await this.http.find(call, 'bills', base, RawBills.billDetail);
     const miss = (guidance: string) => ({
       payload: GetBillOutputSchema.omit({ delivery: true }).parse({
         found: false,
@@ -227,47 +249,31 @@ export class BillsService {
     if (!parent)
       return miss('Call ukparl_search_bills to find a billId before repeating ukparl_get_bill.');
     const bill = Bills.billDetail.parse(normalizeBillValue(parent.data));
-    const handoff = (publications: z.infer<typeof Bills.publication>[] = []) => {
+    const handoff = (publications?: z.infer<typeof Bills.publication>[]) => {
       const links: Link[] = [];
-      for (const publication of publications) {
-        for (const link of publication.links ?? []) {
-          if (!link.url) continue;
-          let url: URL;
-          try {
-            url = new URL(link.url);
-          } catch {
-            continue;
-          }
-          if (
-            url.protocol === 'https:' &&
-            (url.hostname === 'legislation.gov.uk' || url.hostname.endsWith('.legislation.gov.uk'))
-          )
+      for (const publication of publications ?? []) {
+        const published = [
+          ...(publication.links ?? []).map((link) => ({
+            url: link.url,
+            label: link.title,
+            documentId: link.id,
+            format: link.contentType,
+          })),
+          ...(publication.files ?? []).map((file) => ({
+            url: file.downloadUrl,
+            label: file.filename,
+            documentId: file.id,
+            format: file.contentType,
+          })),
+        ];
+        for (const { url, label, documentId, format } of published)
+          if (url && isLegislationUrl(url))
             links.push({
-              url: link.url,
-              label: link.title ?? publication.title ?? 'Published statute',
-              documentId: link.id,
-              ...(link.contentType ? { format: link.contentType } : {}),
+              url,
+              label: label ?? publication.title ?? 'Published statute',
+              documentId,
+              ...(format ? { format } : {}),
             });
-        }
-        for (const file of publication.files ?? []) {
-          if (!file.downloadUrl) continue;
-          let url: URL;
-          try {
-            url = new URL(file.downloadUrl);
-          } catch {
-            continue;
-          }
-          if (
-            url.protocol === 'https:' &&
-            (url.hostname === 'legislation.gov.uk' || url.hostname.endsWith('.legislation.gov.uk'))
-          )
-            links.push({
-              url: file.downloadUrl,
-              label: file.filename ?? publication.title ?? 'Published statute',
-              documentId: file.id,
-              ...(file.contentType ? { format: file.contentType } : {}),
-            });
-        }
       }
       return links.length
         ? { status: 'authoritative_link' as const, links }
@@ -276,7 +282,10 @@ export class BillsService {
           : {
               status: 'unavailable' as const,
               links,
-              reason: 'Parliament supplied no authoritative statute link.',
+              reason:
+                publications === undefined
+                  ? 'Overview has not checked publications. Repeat ukparl_get_bill with the same billId and section=publications to discover authoritative statute links.'
+                  : 'Parliament supplied no authoritative statute link.',
             };
     };
     if (section === 'overview')
@@ -303,7 +312,7 @@ export class BillsService {
           : section === 'amendment'
             ? RawBills.amendmentDetail
             : RawBills.pingpong;
-      const response = await this.entity<z.infer<typeof schema>>(call, path, schema);
+      const response = await this.http.find(call, 'bills', path, schema);
       if (!response)
         return miss(
           `Repeat ukparl_get_bill with section=${section === 'stage' ? 'stages' : section === 'amendment' ? 'amendments' : 'motions'} and the same parent identifiers to find the selected item ID.`,
@@ -326,8 +335,9 @@ export class BillsService {
     let total: number;
     let publications: z.infer<typeof Bills.publication>[] | undefined;
     if (section === 'publications') {
-      const response = await this.entity(
+      const response = await this.http.find(
         call,
+        'bills',
         `${base}/Publications`,
         z.object({
           billId: z.number().int(),
@@ -353,24 +363,30 @@ export class BillsService {
           : section === 'amendments'
             ? billsPage(RawBills.amendment)
             : billsPage(RawBills.pingpong);
-      let response: ParliamentResponse<z.infer<typeof schema>>;
-      try {
-        response = await this.http.get<typeof schema>(
-          call,
-          'bills',
-          path,
-          schema,
-          { Skip: cursor.offset, Take: limit },
-          ['Skip', 'Take'],
+      const response = await this.http.find(
+        call,
+        'bills',
+        path,
+        schema,
+        {
+          Skip: cursor.offset,
+          Take: limit,
+          ...(section === 'amendments'
+            ? {
+                AmendmentNumber: input.amendmentNumber,
+                Decision: input.decision,
+                MemberId: input.memberId,
+              }
+            : {}),
+        },
+        section === 'amendments'
+          ? ['Skip', 'Take', 'AmendmentNumber', 'Decision', 'MemberId']
+          : ['Skip', 'Take'],
+      );
+      if (!response)
+        return miss(
+          'Repeat ukparl_get_bill with section=stages to find a bill-specific billStageId.',
         );
-      } catch (error) {
-        call.signal.throwIfAborted();
-        if (error instanceof McpError && error.code === JsonRpcErrorCode.NotFound)
-          return miss(
-            'Repeat ukparl_get_bill with section=stages to find a bill-specific billStageId.',
-          );
-        throw error;
-      }
       rows = z
         .array(GetBillOutputSchema.shape.items.unwrap().element)
         .parse(normalizeBillValue(response.data.items ?? []))
@@ -391,14 +407,7 @@ export class BillsService {
         items: selectedRows.slice(0, count),
         source,
         detailLevel: section === 'amendments' || section === 'motions' ? 'summary' : 'complete',
-        page: {
-          returned: count,
-          total,
-          hasMore: cursor.offset + count < total,
-          ...(cursor.offset + count < total
-            ? { nextCursor: advanceCollectionCursor(cursor, count) }
-            : {}),
-        },
+        page: pageFor(cursor, count, total),
         ...(publications ? { legislationHandoff: handoff(publications) } : {}),
       });
     return { payload: repage(rows.length), repage, count: rows.length };

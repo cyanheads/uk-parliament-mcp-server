@@ -4,7 +4,11 @@
  */
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { BillSectionSchema, GetBillOutputSchema } from '@/services/bills/bills-schemas.js';
+import {
+  AmendmentDecisionSchema,
+  BillSectionSchema,
+  GetBillOutputSchema,
+} from '@/services/bills/bills-schemas.js';
 import { getBillsService } from '@/services/bills/bills-service.js';
 import {
   deliverPayload,
@@ -21,7 +25,7 @@ import {
 /** Select bill metadata, complete stage/publication records, or amendment/motion summaries and details. */
 export const ukparlGetBill = tool('ukparl_get_bill', {
   description:
-    'Retrieve a Westminster bill overview or select stages, stage, publications, amendments, amendment, motions or motion. Stage/amendment/motion selections require the bill-specific billStageId from section=stages; singular amendment/motion also require itemId from their parent collection. Use amendmentId for amendment retrieval and motion.id for motions. Collection selectors paginate whole records. Statute handoff uses only actual supplied legislation.gov.uk URLs. Follow contentCursor with the original selection to reconstruct oversized records.',
+    'Retrieve a Westminster bill overview or select stages, stage, publications, amendments, amendment, motions or motion. Stage/amendment/motion selections require the bill-specific billStageId from section=stages; singular amendment/motion also require itemId from their parent collection. Use amendmentId for amendment retrieval and motion.id for motions. Filter only the amendments collection by amendmentNumber, decision or sponsoring memberId. Collection selectors paginate whole records. Overview leaves publications unchecked; select publications to discover actual supplied legislation.gov.uk statute links. Follow contentCursor with the original selection to reconstruct oversized records.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     billId: IdSchema.describe('Parent bill identifier from ukparl_search_bills.'),
@@ -34,6 +38,13 @@ export const ukparlGetBill = tool('ukparl_get_bill', {
     itemId: optionalText(IdSchema).describe(
       'Amendment amendmentId or ping-pong motion.id; singular selections only.',
     ),
+    amendmentNumber: optionalText(z.string().trim().min(1)).describe(
+      'Published amendment number, retaining letter suffixes; amendments collection only.',
+    ),
+    decision: optionalText(AmendmentDecisionSchema).describe(
+      'Official amendment decision filter; amendments collection only.',
+    ),
+    memberId: optionalText(IdSchema).describe('Sponsoring member ID; amendments collection only.'),
     cursor: optionalText(z.string().min(1)).describe('Collection continuation; collections only.'),
     limit: z
       .number()
@@ -55,6 +66,9 @@ export const ukparlGetBill = tool('ukparl_get_bill', {
         section: BillSectionSchema.describe('Applied section.'),
         billStageId: z.string().optional().describe('Stage occurrence ID.'),
         itemId: z.string().optional().describe('Selected retrieval ID.'),
+        amendmentNumber: z.string().optional().describe('Applied published amendment number.'),
+        decision: AmendmentDecisionSchema.optional().describe('Applied amendment decision filter.'),
+        memberId: z.string().optional().describe('Applied amendment sponsor ID.'),
         source: z.literal('bills').describe('Official Bills API.'),
         limit: z.number().int().optional().describe('Effective collection limit.'),
       })
@@ -176,16 +190,20 @@ export const ukparlGetBill = tool('ukparl_get_bill', {
     using call = getParliamentHttp().beginCall(ctx);
     const collection = ['stages', 'publications', 'amendments', 'motions'].includes(input.section);
     const limit = Math.min(input.limit ?? 20, 50);
+    const capped = collection && (input.limit ?? 20) > limit;
     const applied = {
       billId: input.billId,
       section: input.section,
       ...(input.billStageId ? { billStageId: input.billStageId } : {}),
       ...(input.itemId ? { itemId: input.itemId } : {}),
+      ...(input.amendmentNumber !== undefined ? { amendmentNumber: input.amendmentNumber } : {}),
+      ...(input.decision !== undefined ? { decision: input.decision } : {}),
+      ...(input.memberId !== undefined ? { memberId: input.memberId } : {}),
       source: 'bills' as const,
       ...(collection ? { limit } : {}),
     };
     const result = await getBillsService().get(input, call);
-    const notice = `${LICENCE_NOTICE}${collection && (input.limit ?? 20) > limit ? ` Requested limit ${input.limit} is capped at ${limit}.` : ''}${result.payload.items?.length === 0 ? ` The source returned no items for ukparl_get_bill section=${input.section} with these parent identifiers.` : ''}`;
+    const notice = `${LICENCE_NOTICE}${capped ? ` Requested limit ${input.limit} is capped at ${limit}.` : ''}${result.payload.items?.length === 0 ? ` The source returned no items for ukparl_get_bill section=${input.section} with these parent identifiers.` : ''}`;
     return deliverPayload(result.payload, {
       tool: 'ukparl_get_bill',
       selection: { ...applied, cursor: input.cursor },
@@ -204,7 +222,7 @@ export const ukparlGetBill = tool('ukparl_get_bill', {
         applied,
         notice,
         ...(selected.page?.total !== undefined ? { totalCount: selected.page.total } : {}),
-        ...(collection && (input.limit ?? 20) > limit ? { requestedLimit: input.limit } : {}),
+        ...(capped ? { requestedLimit: input.limit } : {}),
         ...(selected.page?.hasMore
           ? { truncated: true, shown: selected.page.returned, cap: limit }
           : {}),

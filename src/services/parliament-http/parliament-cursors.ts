@@ -5,15 +5,7 @@
 import { createHash } from 'node:crypto';
 import { z } from '@cyanheads/mcp-ts-core';
 import { invalidParams } from '@cyanheads/mcp-ts-core/errors';
-
-/** JSON values admitted after a domain schema validates the selected payload. */
-export type JsonValue =
-  | null
-  | boolean
-  | number
-  | string
-  | JsonValue[]
-  | { [key: string]: JsonValue };
+import type { Page } from './parliament-models.js';
 
 function canonical(value: unknown, omitRetrieval: boolean): unknown {
   if (Array.isArray(value)) return value.map((item) => canonical(item, omitRetrieval));
@@ -49,7 +41,8 @@ export const CollectionCursorSchema = z
     source: z.string(),
     selector: z.string(),
     filters: z.string(),
-    offset: z.number().int().nonnegative(),
+    // Upstream skip/take parameters are int32.
+    offset: z.number().int().nonnegative().max(2147483647),
     nativePage: z.number().int().positive().optional(),
     nativePageSize: z.number().int().positive(),
     intraPageOffset: z.number().int().nonnegative().optional(),
@@ -126,4 +119,14 @@ export function advanceCollectionCursor(cursor: CollectionCursor, emitted: numbe
       intraPageOffset: offset % cursor.nativePageSize,
     });
   return encodeCursor({ ...cursor, offset });
+}
+/** Whole-item page against a known total; the continuation advances by the emitted count. */
+export function pageFor(cursor: CollectionCursor, returned: number, total: number): Page {
+  const hasMore = cursor.offset + returned < total;
+  return {
+    returned,
+    total,
+    hasMore,
+    ...(hasMore ? { nextCursor: advanceCollectionCursor(cursor, returned) } : {}),
+  };
 }

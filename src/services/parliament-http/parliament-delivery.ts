@@ -14,10 +14,10 @@ import {
 import { type Page, PageSchema, type Source, SourceSchema } from './parliament-models.js';
 
 /** Complete rendered result byte ceiling, including both MCP surfaces. */
-export const DELIVERY_LIMIT_BYTES = 24_000;
+const DELIVERY_LIMIT_BYTES = 24_000;
 const ValueTypeSchema = z.enum(['object', 'array', 'string', 'number', 'boolean', 'null']);
 /** Recursive continuation metadata; fragments concatenate before one JSON parse. */
-export const ContentPageSchema = z.object({
+const ContentPageSchema = z.object({
   path: z.string().describe('RFC 6901 pointer into the fully validated normalized payload.'),
   kind: z.enum(['object', 'array', 'scalar']).describe('Type of the selected subtree.'),
   entries: z
@@ -32,6 +32,12 @@ export const ContentPageSchema = z.object({
             .nonnegative()
             .describe('UTF-8 bytes of its complete JSON value.'),
           contentCursor: z.string().describe('Opaque same-tool child continuation.'),
+          jsonValue: z
+            .string()
+            .optional()
+            .describe(
+              'Complete child JSON text when it fits; decode once or follow contentCursor for the identical value.',
+            ),
         })
         .describe('One whole child continuation descriptor.'),
     )
@@ -129,22 +135,21 @@ function fenced(value: unknown): string {
   const fence = '`'.repeat(fenceLength);
   return `${fence}json\n${text}\n${fence}`;
 }
-/** Render every value recursively; source strings remain reversible JSON and links stay live. */
-export function renderData(value: unknown, path = ''): string {
-  if (value === null || typeof value !== 'object') {
-    const link =
-      typeof value === 'string' && /^https:\/\/[^\s]+$/.test(value)
-        ? `\n[Open source link](<${value.replaceAll('<', '%3C').replaceAll('>', '%3E')}>)`
-        : '';
-    return `${path || 'value'}\n${fenced(value)}${link}`;
+/** Render one reversible JSON value and retain clickable HTTPS links, including in inline children. */
+function renderData(value: unknown, path = ''): string {
+  const links = new Set<string>();
+  const visit = (node: unknown): void => {
+    if (typeof node === 'string' && /^https:\/\/[^\s]+$/.test(node)) links.add(node);
+    else if (node !== null && typeof node === 'object')
+      for (const child of Object.values(node)) visit(child);
+  };
+  visit(value);
+  if (value !== null && typeof value === 'object' && Reflect.get(value, 'delivery') === 'outline') {
+    const page = ContentPageSchema.parse(Reflect.get(value, 'contentPage'));
+    for (const entry of page.entries ?? [])
+      if (entry.jsonValue !== undefined) visit(JSON.parse(entry.jsonValue));
   }
-  const entries = Object.entries(value).filter(([, item]) => item !== undefined);
-  if (!entries.length) return `${path || 'value'}\n${Array.isArray(value) ? '[]' : '{}'}`;
-  return entries
-    .map(([key, item]) =>
-      renderData(item, `${path}/${key.replaceAll('~', '~0').replaceAll('/', '~1')}`),
-    )
-    .join('\n\n');
+  return `${path || 'value'}\n${fenced(value)}${[...links].map((link) => `\n[Open source link](<${link.replaceAll('<', '%3C').replaceAll('>', '%3E')}>)`).join('')}`;
 }
 /** Default MCP content renderer, sharing the exact same data as structuredContent. */
 export function formatData(value: unknown): { type: 'text'; text: string }[] {
@@ -155,7 +160,7 @@ export function enrichmentField(key: string): (value: unknown) => string {
   return (value) => renderData(value, key);
 }
 /** Exact trailer emitted by per-field enrichmentField renderers, including the framework separator. */
-export function renderEnrichment(values: object): string {
+function renderEnrichment(values: object): string {
   return `\n\n${Object.entries(values)
     .filter(([, value]) => value !== undefined)
     .map(([key, value]) => enrichmentField(key)(value))
@@ -181,10 +186,13 @@ export interface DeliveryOptions<T extends object, E extends object = object> {
   tool: string;
 }
 /** Measure the complete MCP result, accounting for both surfaces and enrichment. */
-export function renderedBytes(
+function renderedBytes(
   value: object,
   options: Pick<DeliveryOptions<object>, 'enrichment' | 'enrichmentText' | 'format'> = {},
 ): number {
+  const structuredContent = { ...value, ...options.enrichment };
+  const structuredBytes = Buffer.byteLength(json(structuredContent));
+  if (structuredBytes > DELIVERY_LIMIT_BYTES) return structuredBytes;
   const content = (options.format ?? formatData)(value);
   if (options.enrichment && Object.keys(options.enrichment).length)
     content.push({
@@ -192,7 +200,7 @@ export function renderedBytes(
       text: options.enrichmentText ?? renderEnrichment(options.enrichment),
     });
   return Buffer.byteLength(
-    json({ content, structuredContent: { ...value, ...options.enrichment } }),
+    json({ jsonrpc: '2.0', id: Number.MAX_SAFE_INTEGER, result: { content, structuredContent } }),
   );
 }
 function pointerValue(payload: unknown, path: string): unknown {
@@ -261,11 +269,23 @@ export function deliverPayload<T extends object, E extends object = object>(
   const full = { ...payload, delivery: 'full' as const };
   if (!options.contentCursor && measure(full) <= DELIVERY_LIMIT_BYTES) return finish(full);
   const binding = digest({ tool: options.tool, selection: options.selection });
-  const revision = digest(payload, true);
+  let revision = digest(payload, true);
   const cursor = options.contentCursor
     ? decodeCursor(options.contentCursor, ContentCursorSchema)
     : { v: 1 as const, binding, revision, path: '', arm: 'entries' as const, offset: 0 };
   if (cursor.binding !== binding) return invalidCursor();
+  if (cursor.revision !== revision && options.collection) {
+    // Earlier renderers may have selected a smaller prefix under the same byte budget.
+    for (let count = 1; count <= options.collection.count; count++) {
+      const previous = options.collection.repage(count);
+      const previousRevision = digest(previous, true);
+      if (previousRevision !== cursor.revision) continue;
+      payload = previous;
+      revision = previousRevision;
+      enrichment = options.enrichmentFor?.(payload) ?? options.enrichment;
+      break;
+    }
+  }
   if (cursor.revision !== revision)
     throw conflict('The selected source changed during content retrieval.', {
       reason: 'source_changed',
@@ -293,7 +313,7 @@ export function deliverPayload<T extends object, E extends object = object>(
     ...(context?.identity ? { identity: context.identity } : {}),
     ...(context?.page ? { collectionPage: context.page } : {}),
   };
-  const retrieval = `Repeat ${options.tool} with the same original filters, mode, collection cursor and effective limit plus each contentCursor. Reconstruct this payload before advancing the collection cursor. Concatenate consecutive fragments before JSON-decoding once.`;
+  const retrieval = `Repeat ${options.tool} with the same original filters, mode, collection cursor and effective limit plus each contentCursor. Decode a descriptor's jsonValue directly when present, or follow its contentCursor for the same value. Reconstruct this payload before advancing the collection cursor. Concatenate consecutive fragments before JSON-decoding once.`;
   const fits = (value: ContentDelivery): boolean => {
     if (measure(value) <= DELIVERY_LIMIT_BYTES) return true;
     const metadataOnly: ContentDelivery = {
@@ -348,7 +368,7 @@ export function deliverPayload<T extends object, E extends object = object>(
     );
     if (cursor.offset >= children.length) return invalidCursor();
     const entries: NonNullable<ContentPage['entries']> = [];
-    let result: ContentDelivery | undefined;
+    let result: (ContentDelivery & { contentPage: { entries: typeof entries } }) | undefined;
     for (const [key, value] of children.slice(cursor.offset, cursor.offset + 20)) {
       const path = `${cursor.path}/${key.replaceAll('~', '~0').replaceAll('/', '~1')}`;
       const valueType = typeOf(value);
@@ -363,7 +383,7 @@ export function deliverPayload<T extends object, E extends object = object>(
         ),
       });
       const end = cursor.offset + entries.length;
-      const candidate: ContentDelivery = {
+      const candidate = {
         ...retained,
         delivery: 'outline',
         retrieval,
@@ -374,11 +394,17 @@ export function deliverPayload<T extends object, E extends object = object>(
           hasMore: end < children.length,
           ...(end < children.length ? { nextCursor: makeCursor(cursor.path, 'entries', end) } : {}),
         },
-      };
+      } satisfies ContentDelivery;
       if (!fits(candidate)) break;
       result = candidate;
     }
     if (!result) throw internalError('A content descriptor cannot fit the response envelope.');
+    for (const entry of result.contentPage.entries) {
+      if (entry.sizeBytes > DELIVERY_LIMIT_BYTES) continue;
+      const encoded = json(pointerValue(payload, entry.path));
+      entry.jsonValue = encoded;
+      if (!fits(result)) delete entry.jsonValue;
+    }
     return finish(result);
   }
   if (cursor.arm !== 'fragment' && options.contentCursor) return invalidCursor();
@@ -389,7 +415,11 @@ export function deliverPayload<T extends object, E extends object = object>(
       /[\uDC00-\uDFFF]/.test(text[cursor.offset] ?? ''))
   )
     return invalidCursor();
-  let end = safeEnd(text, cursor.offset, cursor.offset + 2000);
+  const minimumEnd =
+    safeEnd(text, cursor.offset, cursor.offset + 1) === cursor.offset
+      ? cursor.offset + 2
+      : cursor.offset + 1;
+  let end = safeEnd(text, cursor.offset, cursor.offset + DELIVERY_LIMIT_BYTES);
   while (end > cursor.offset) {
     const candidate: ContentDelivery = {
       ...retained,
@@ -407,7 +437,19 @@ export function deliverPayload<T extends object, E extends object = object>(
       },
     };
     if (fits(candidate)) return finish(candidate);
-    end = safeEnd(text, cursor.offset, end - 1);
+    if (end === minimumEnd) break;
+    // Refit from the measured byte cost rather than re-rendering every binary-search midpoint.
+    const overhead = measure({
+      ...candidate,
+      contentPage: { ...candidate.contentPage, fragment: '' },
+    });
+    const bytes = measure(candidate);
+    const available = Math.max(0, DELIVERY_LIMIT_BYTES - overhead);
+    const units = Math.floor(((end - cursor.offset) * available) / (bytes - overhead)) - 1;
+    end = Math.max(
+      minimumEnd,
+      safeEnd(text, cursor.offset, Math.min(end - 1, cursor.offset + Math.max(0, units))),
+    );
   }
   throw internalError('A scalar code point cannot fit the response envelope.');
 }

@@ -497,7 +497,7 @@ export const PublicationRawSchema: z.ZodType<PublicationRaw> = z.lazy(() =>
   }),
 );
 /** Complete ContactInformation source metadata; undocumented extra fields are ignored. */
-export const ContactInformationRawSchema: z.ZodType<ContactInformationRaw> = z.lazy(() =>
+const ContactInformationRawSchema: z.ZodType<ContactInformationRaw> = z.lazy(() =>
   z.object({
     email: z.string().nullish().describe('Current contact email.'),
     phone: z.string().nullish().describe('Telephone number.'),
@@ -571,7 +571,7 @@ export const CommitteeSummaryRawSchema: z.ZodType<CommitteeSummaryRaw> = z.lazy(
   }),
 );
 /** Complete LeadHouse source metadata; undocumented extra fields are ignored. */
-export const LeadHouseRawSchema: z.ZodType<LeadHouseRaw> = z.lazy(() =>
+const LeadHouseRawSchema: z.ZodType<LeadHouseRaw> = z.lazy(() =>
   z.object({
     isCommons: z
       .boolean()
@@ -584,14 +584,14 @@ export const LeadHouseRawSchema: z.ZodType<LeadHouseRaw> = z.lazy(() =>
   }),
 );
 /** Complete CommitteeCategory source metadata; undocumented extra fields are ignored. */
-export const CommitteeCategoryRawSchema: z.ZodType<CommitteeCategoryRaw> = z.lazy(() =>
+const CommitteeCategoryRawSchema: z.ZodType<CommitteeCategoryRaw> = z.lazy(() =>
   z.object({
     id: z.number().int().describe('Gets or sets the unique identifier for the committee category.'),
     name: z.string().nullish().describe('Gets or sets the name of the committee category.'),
   }),
 );
 /** Complete CommitteeType source metadata; undocumented extra fields are ignored. */
-export const CommitteeTypeRawSchema: z.ZodType<CommitteeTypeRaw> = z.lazy(() =>
+const CommitteeTypeRawSchema: z.ZodType<CommitteeTypeRaw> = z.lazy(() =>
   z.object({
     id: z.number().int().describe('Gets or sets the unique identifier for the committee type.'),
     name: z.string().nullish().describe('Gets or sets the name of the committee type.'),
@@ -601,7 +601,7 @@ export const CommitteeTypeRawSchema: z.ZodType<CommitteeTypeRaw> = z.lazy(() =>
   }),
 );
 /** Complete ScrutinisingDepartment source metadata; undocumented extra fields are ignored. */
-export const ScrutinisingDepartmentRawSchema: z.ZodType<ScrutinisingDepartmentRaw> = z.lazy(() =>
+const ScrutinisingDepartmentRawSchema: z.ZodType<ScrutinisingDepartmentRaw> = z.lazy(() =>
   z.object({
     departmentId: z
       .number()
@@ -615,7 +615,7 @@ export const ScrutinisingDepartmentRawSchema: z.ZodType<ScrutinisingDepartmentRa
   }),
 );
 /** Complete CommitteeName source metadata; undocumented extra fields are ignored. */
-export const CommitteeNameRawSchema: z.ZodType<CommitteeNameRaw> = z.lazy(() =>
+const CommitteeNameRawSchema: z.ZodType<CommitteeNameRaw> = z.lazy(() =>
   z.object({
     id: z.number().int().describe('Gets or sets the unique identifier for the committee name.'),
     committeeId: z
@@ -632,7 +632,7 @@ export const CommitteeNameRawSchema: z.ZodType<CommitteeNameRaw> = z.lazy(() =>
   }),
 );
 /** Complete Banner source metadata; undocumented extra fields are ignored. */
-export const BannerRawSchema: z.ZodType<BannerRaw> = z.lazy(() =>
+const BannerRawSchema: z.ZodType<BannerRaw> = z.lazy(() =>
   z.object({
     desktopBanner: FileRawSchema.nullish().describe(
       'Published source value; null or omission preserves absence.',
@@ -643,7 +643,7 @@ export const BannerRawSchema: z.ZodType<BannerRaw> = z.lazy(() =>
   }),
 );
 /** Complete ContentLink source metadata; undocumented extra fields are ignored. */
-export const ContentLinkRawSchema: z.ZodType<ContentLinkRaw> = z.lazy(() =>
+const ContentLinkRawSchema: z.ZodType<ContentLinkRaw> = z.lazy(() =>
   z.object({
     title: z.string().nullish().describe('Title of the content link.'),
     url: z.string().nullish().describe('URL of the content link.'),
@@ -652,7 +652,7 @@ export const ContentLinkRawSchema: z.ZodType<ContentLinkRaw> = z.lazy(() =>
   }),
 );
 /** Complete MemberInfo source metadata; undocumented extra fields are ignored. */
-export const MemberInfoRawSchema: z.ZodType<MemberInfoRaw> = z.lazy(() =>
+const MemberInfoRawSchema: z.ZodType<MemberInfoRaw> = z.lazy(() =>
   z.object({
     memberFrom: z.string().nullish().describe('Gets or sets the location the member represents.'),
     party: z.string().nullish().describe('Gets or sets the political party of the member.'),
@@ -685,7 +685,7 @@ export const MemberInfoRawSchema: z.ZodType<MemberInfoRaw> = z.lazy(() =>
   }),
 );
 /** Complete CommitteeMemberRole source metadata; undocumented extra fields are ignored. */
-export const CommitteeMemberRoleRawSchema: z.ZodType<CommitteeMemberRoleRaw> = z.lazy(() =>
+const CommitteeMemberRoleRawSchema: z.ZodType<CommitteeMemberRoleRaw> = z.lazy(() =>
   z.object({
     startDate: z
       .string()
@@ -712,7 +712,7 @@ export const CommitteeMemberRoleRawSchema: z.ZodType<CommitteeMemberRoleRaw> = z
   }),
 );
 /** Complete CommitteeBusinessType source metadata; undocumented extra fields are ignored. */
-export const CommitteeBusinessTypeRawSchema: z.ZodType<CommitteeBusinessTypeRaw> = z.lazy(() =>
+const CommitteeBusinessTypeRawSchema: z.ZodType<CommitteeBusinessTypeRaw> = z.lazy(() =>
   z.object({
     id: z.number().int().describe('Gets or sets the unique identifier for the business type.'),
     name: z.string().nullish().describe('Gets or sets the name of the business type.'),
@@ -727,7 +727,7 @@ export const CommitteeBusinessTypeRawSchema: z.ZodType<CommitteeBusinessTypeRaw>
   }),
 );
 /** Complete PublicationSummary source metadata; undocumented extra fields are ignored. */
-export const PublicationSummaryRawSchema: z.ZodType<PublicationSummaryRaw> = z.lazy(() =>
+const PublicationSummaryRawSchema: z.ZodType<PublicationSummaryRaw> = z.lazy(() =>
   z.object({
     description: z.string().nullish().describe('Description of publication.'),
     id: z.number().int().describe('The ID of the publication.'),
@@ -774,7 +774,7 @@ export const PublicationSummaryRawSchema: z.ZodType<PublicationSummaryRaw> = z.l
   }),
 );
 /** Complete SubmissionPeriodSummary source metadata; undocumented extra fields are ignored. */
-export const SubmissionPeriodSummaryRawSchema: z.ZodType<SubmissionPeriodSummaryRaw> = z.lazy(() =>
+const SubmissionPeriodSummaryRawSchema: z.ZodType<SubmissionPeriodSummaryRaw> = z.lazy(() =>
   z.object({
     id: z.number().int().describe('Id of the submission period.'),
     startDate: z.string().nullish().describe('Submission period start date.'),
@@ -799,7 +799,7 @@ export const SubmissionPeriodSummaryRawSchema: z.ZodType<SubmissionPeriodSummary
   }),
 );
 /** Complete ActivitySummary source metadata; undocumented extra fields are ignored. */
-export const ActivitySummaryRawSchema: z.ZodType<ActivitySummaryRaw> = z.lazy(() =>
+const ActivitySummaryRawSchema: z.ZodType<ActivitySummaryRaw> = z.lazy(() =>
   z.object({
     id: z.number().int().describe('The id of the activity.'),
     name: z.string().nullish().describe('The name of the activity.'),
@@ -819,14 +819,14 @@ export const ActivitySummaryRawSchema: z.ZodType<ActivitySummaryRaw> = z.lazy(()
   }),
 );
 /** Complete Links source metadata; undocumented extra fields are ignored. */
-export const LinksRawSchema: z.ZodType<LinksRaw> = z.lazy(() =>
+const LinksRawSchema: z.ZodType<LinksRaw> = z.lazy(() =>
   z.object({
     url: z.string().nullish().describe('Gets or sets the URL of the link.'),
     description: z.string().nullish().describe('Gets or sets the description of the link.'),
   }),
 );
 /** Complete HouseNumber source metadata; undocumented extra fields are ignored. */
-export const HouseNumberRawSchema: z.ZodType<HouseNumberRaw> = z.lazy(() =>
+const HouseNumberRawSchema: z.ZodType<HouseNumberRaw> = z.lazy(() =>
   z.object({
     number: z.string().nullish().describe('Gets or sets the house number.'),
     sessionId: z
@@ -841,7 +841,7 @@ export const HouseNumberRawSchema: z.ZodType<HouseNumberRaw> = z.lazy(() =>
   }),
 );
 /** Complete GovernmentResponse source metadata; undocumented extra fields are ignored. */
-export const GovernmentResponseRawSchema: z.ZodType<GovernmentResponseRaw> = z.lazy(() =>
+const GovernmentResponseRawSchema: z.ZodType<GovernmentResponseRaw> = z.lazy(() =>
   z.object({
     publication: z
       .array(PublicationSummaryRawSchema)
@@ -858,7 +858,7 @@ export const GovernmentResponseRawSchema: z.ZodType<GovernmentResponseRaw> = z.l
   }),
 );
 /** Complete Document source metadata; undocumented extra fields are ignored. */
-export const DocumentRawSchema: z.ZodType<DocumentRaw> = z.lazy(() =>
+const DocumentRawSchema: z.ZodType<DocumentRaw> = z.lazy(() =>
   z.object({
     documentId: z.number().int().describe('Gets or sets the unique identifier for the document.'),
     files: z
@@ -868,7 +868,7 @@ export const DocumentRawSchema: z.ZodType<DocumentRaw> = z.lazy(() =>
   }),
 );
 /** Complete PublicationType source metadata; undocumented extra fields are ignored. */
-export const PublicationTypeRawSchema: z.ZodType<PublicationTypeRaw> = z.lazy(() =>
+const PublicationTypeRawSchema: z.ZodType<PublicationTypeRaw> = z.lazy(() =>
   z.object({
     id: z.number().int().describe('The id of the publication type.'),
     name: z.string().nullish().describe('The name of the publication type.'),
@@ -889,7 +889,7 @@ export const PublicationTypeRawSchema: z.ZodType<PublicationTypeRaw> = z.lazy(()
   }),
 );
 /** Complete Department source metadata; undocumented extra fields are ignored. */
-export const DepartmentRawSchema: z.ZodType<DepartmentRaw> = z.lazy(() =>
+const DepartmentRawSchema: z.ZodType<DepartmentRaw> = z.lazy(() =>
   z.object({
     id: z.number().int().describe('Gets or sets the unique identifier for the department.'),
     name: z.string().nullish().describe('Gets or sets the name of the department.'),
@@ -936,14 +936,14 @@ export const CommitteeBusinessSummaryRawSchema: z.ZodType<CommitteeBusinessSumma
     }),
 );
 /** Complete File source metadata; undocumented extra fields are ignored. */
-export const FileRawSchema: z.ZodType<FileRaw> = z.lazy(() =>
+const FileRawSchema: z.ZodType<FileRaw> = z.lazy(() =>
   z.object({
     fileName: z.string().nullish().describe('Gets or sets the name of the file.'),
     fileData: z.string().nullish().describe('Gets or sets the binary data of the file.'),
   }),
 );
 /** Complete Role source metadata; undocumented extra fields are ignored. */
-export const RoleRawSchema: z.ZodType<RoleRaw> = z.lazy(() =>
+const RoleRawSchema: z.ZodType<RoleRaw> = z.lazy(() =>
   z.object({
     id: z.number().int().describe('The id of the role.'),
     name: z.string().nullish().describe('The name of the role.'),
@@ -954,7 +954,7 @@ export const RoleRawSchema: z.ZodType<RoleRaw> = z.lazy(() =>
   }),
 );
 /** Complete ActivityPerson source metadata; undocumented extra fields are ignored. */
-export const ActivityPersonRawSchema: z.ZodType<ActivityPersonRaw> = z.lazy(() =>
+const ActivityPersonRawSchema: z.ZodType<ActivityPersonRaw> = z.lazy(() =>
   z.object({
     id: z.number().int().describe('Gets or sets the unique identifier for the person.'),
     personId: z.number().int().nullish().describe('Gets or sets the optional person ID.'),
@@ -982,7 +982,7 @@ export const ActivityPersonRawSchema: z.ZodType<ActivityPersonRaw> = z.lazy(() =
   }),
 );
 /** Complete DocumentFile source metadata; undocumented extra fields are ignored. */
-export const DocumentFileRawSchema: z.ZodType<DocumentFileRaw> = z.lazy(() =>
+const DocumentFileRawSchema: z.ZodType<DocumentFileRaw> = z.lazy(() =>
   z.object({
     fileName: z.string().nullish().describe('Gets or sets the name of the file.'),
     fileSize: z
@@ -1001,7 +1001,7 @@ export const DocumentFileRawSchema: z.ZodType<DocumentFileRaw> = z.lazy(() =>
   }),
 );
 /** Complete Address source metadata; undocumented extra fields are ignored. */
-export const AddressRawSchema: z.ZodType<AddressRaw> = z.lazy(() =>
+const AddressRawSchema: z.ZodType<AddressRaw> = z.lazy(() =>
   z.object({
     addressLine1: z.string().nullish().describe('Gets or sets the first line of the address.'),
     addressLine2: z.string().nullish().describe('Gets or sets the second line of the address.'),
@@ -1012,14 +1012,14 @@ export const AddressRawSchema: z.ZodType<AddressRaw> = z.lazy(() =>
   }),
 );
 /** Complete RoleType source metadata; undocumented extra fields are ignored. */
-export const RoleTypeRawSchema: z.ZodType<RoleTypeRaw> = z.lazy(() =>
+const RoleTypeRawSchema: z.ZodType<RoleTypeRaw> = z.lazy(() =>
   z.object({
     id: z.number().int().describe('The id of the role type.'),
     name: z.string().nullish().describe('The name of the role type.'),
   }),
 );
 /** Complete Organisation source metadata; undocumented extra fields are ignored. */
-export const OrganisationRawSchema: z.ZodType<OrganisationRaw> = z.lazy(() =>
+const OrganisationRawSchema: z.ZodType<OrganisationRaw> = z.lazy(() =>
   z.object({
     name: z.string().nullish().describe('Gets or sets the name of the organization.'),
     role: z.string().nullish().describe('Gets or sets the role of the organization.'),
@@ -1032,7 +1032,7 @@ export const OrganisationRawSchema: z.ZodType<OrganisationRaw> = z.lazy(() =>
   }),
 );
 /** Complete DocumentPurpose source metadata; undocumented extra fields are ignored. */
-export const DocumentPurposeRawSchema: z.ZodType<DocumentPurposeRaw> = z.lazy(() =>
+const DocumentPurposeRawSchema: z.ZodType<DocumentPurposeRaw> = z.lazy(() =>
   z.object({
     id: z.number().int().describe('Gets or sets the unique identifier for the document purpose.'),
     name: z.string().nullish().describe('Gets or sets the name of the document purpose.'),
@@ -1961,8 +1961,116 @@ const DocumentPurposeNodeSchema = z
       .describe('Gets or sets the sort order for the document purpose.'),
   })
   .describe('Complete DocumentPurpose metadata and source-path relationships.');
-/** Every typed entity needed to reconstruct a whole committee, membership, business or publication. */
-export const CommitteeEntitySchema = z.discriminatedUnion('kind', [
+const SubmitterRawSchema = z.object({
+  id: z.number().int().describe('Committee submitter identifier, distinct from MNIS.'),
+  personId: z.number().int().nullish().describe('Source person identifier.'),
+  name: z.string().nullish().describe('Published witness name.'),
+  photoUrl: z.string().nullish().describe('Published witness photo URL.'),
+  memberInfo: MemberInfoRawSchema.nullish().describe('Published parliamentary member metadata.'),
+  organisations: z
+    .array(OrganisationRawSchema)
+    .nullish()
+    .describe('Ordered witness organisations.'),
+  submitterType: SubmitterTypeRawSchema.nullish().describe('Source submitter type.'),
+  additionalContext: z.string().nullish().describe('Source witness context, including HTML.'),
+});
+const EvidenceRawSchema = z.object({
+  id: z.number().int().describe('Evidence ID within the written or oral namespace.'),
+  publicationDate: z.string().nullish().describe('Source publication date.'),
+  witnesses: z.array(SubmitterRawSchema).nullish().describe('Ordered evidence witnesses.'),
+  document: DocumentRawSchema.nullish().describe('Complete supplied document metadata.'),
+  committees: z.array(CommitteeSummaryRawSchema).nullish().describe('Associated committees.'),
+  legacyHtmlUrl: z.string().nullish().describe('Supplied legacy HTML URL.'),
+  legacyPdfUrl: z.string().nullish().describe('Supplied legacy PDF URL.'),
+});
+/** Written evidence schema follows the official source contract, including absent/null values. */
+export const WrittenEvidenceRawSchema = EvidenceRawSchema.extend({
+  submissionId: z.string().nullish().describe('Source submission UUID.'),
+  internalReference: z.string().nullish().describe('Source submission reference.'),
+  committeeBusiness: CommitteeBusinessSummaryRawSchema.nullish().describe('Associated business.'),
+  hcNumber: HouseNumberRawSchema.nullish().describe('Commons paper metadata.'),
+  anonymous: z.boolean().nullish().describe('Source anonymity state.'),
+  anonymousWitnessText: z.string().nullish().describe('Published anonymous witness text.'),
+});
+/** Oral evidence schema retains activity identity, meeting dates and all associated businesses. */
+export const OralEvidenceRawSchema = EvidenceRawSchema.extend({
+  activityId: z.number().int().nullish().describe('Source activity identifier.'),
+  meetingDate: z.string().nullish().describe('Source meeting date.'),
+  activityStartDate: z.string().nullish().describe('Source activity start datetime.'),
+  committeeBusinesses: z
+    .array(CommitteeBusinessSummaryRawSchema)
+    .nullish()
+    .describe('Associated businesses in source order.'),
+  hcNumbers: z.array(HouseNumberRawSchema).nullish().describe('Commons papers in source order.'),
+});
+const EvidenceRelationships = {
+  sourcePath: z.string().describe('Exact JSON pointer into the selected evidence record.'),
+  witnessesPaths: z
+    .array(z.string().describe('Ordered witness pointer.'))
+    .nullish()
+    .describe('Witness relationships preserving absence.'),
+  documentPath: z.string().nullish().describe('Document relationship preserving absence.'),
+  committeesPaths: z
+    .array(z.string().describe('Ordered committee pointer.'))
+    .nullish()
+    .describe('Committee relationships preserving absence.'),
+};
+const WrittenEvidenceNodeSchema = WrittenEvidenceRawSchema.omit({
+  witnesses: true,
+  document: true,
+  committees: true,
+  committeeBusiness: true,
+  hcNumber: true,
+})
+  .extend({
+    ...EvidenceRelationships,
+    kind: z.literal('WrittenEvidence').describe('Official source entity type.'),
+    committeeBusinessPath: z
+      .string()
+      .nullish()
+      .describe('Business relationship preserving absence.'),
+    hcNumberPath: z.string().nullish().describe('Paper relationship preserving absence.'),
+  })
+  .describe('Complete WrittenEvidence metadata and source-path relationships.');
+const OralEvidenceNodeSchema = OralEvidenceRawSchema.omit({
+  witnesses: true,
+  document: true,
+  committees: true,
+  committeeBusinesses: true,
+  hcNumbers: true,
+})
+  .extend({
+    ...EvidenceRelationships,
+    kind: z.literal('OralEvidence').describe('Official source entity type.'),
+    committeeBusinessesPaths: z
+      .array(z.string().describe('Ordered business pointer.'))
+      .nullish()
+      .describe('Business relationships preserving absence.'),
+    hcNumbersPaths: z
+      .array(z.string().describe('Ordered paper pointer.'))
+      .nullish()
+      .describe('Paper relationships preserving absence.'),
+  })
+  .describe('Complete OralEvidence metadata and source-path relationships.');
+const SubmitterNodeSchema = SubmitterRawSchema.omit({
+  memberInfo: true,
+  organisations: true,
+})
+  .extend({
+    kind: z.literal('Submitter').describe('Official source entity type.'),
+    sourcePath: z.string().describe('Exact JSON pointer into the selected evidence record.'),
+    memberInfoPath: z.string().nullish().describe('Member relationship preserving absence.'),
+    organisationsPaths: z
+      .array(z.string().describe('Ordered organisation pointer.'))
+      .nullish()
+      .describe('Organisation relationships preserving absence.'),
+  })
+  .describe('Complete Submitter metadata and source-path relationships.');
+/** Every typed entity needed to reconstruct a whole committee, membership, business, publication or evidence. */
+const CommitteeEntitySchema = z.discriminatedUnion('kind', [
+  WrittenEvidenceNodeSchema,
+  OralEvidenceNodeSchema,
+  SubmitterNodeSchema,
   CommitteeDetailsNodeSchema,
   CommitteeMemberNodeSchema,
   CommitteeBusinessDetailsNodeSchema,
@@ -2003,7 +2111,14 @@ type CommitteeEntity = z.infer<typeof CommitteeEntitySchema>;
 export const CommitteeRecordSchema = z.object({
   recordId: z.string().describe('Selected source ID; namespace is identified by recordType.'),
   recordType: z
-    .enum(['committee', 'membership', 'business', 'publication'])
+    .enum([
+      'committee',
+      'membership',
+      'business',
+      'publication',
+      'written_evidence',
+      'oral_evidence',
+    ])
     .describe('Selected source record namespace.'),
   memberId: z
     .string()
@@ -2720,4 +2835,99 @@ export function normalizePublication(value: PublicationRaw): z.infer<typeof Comm
   const entities: CommitteeEntity[] = [];
   visitPublication(value, '', entities);
   return { recordId: String(value.id), recordType: 'publication', rootPath: '', entities };
+}
+
+function evidenceRelationships(value: z.infer<typeof EvidenceRawSchema>) {
+  return {
+    sourcePath: '',
+    documentPath: value.document == null ? value.document : '/document',
+    witnessesPaths:
+      value.witnesses == null
+        ? value.witnesses
+        : value.witnesses.map((_, index) => `/witnesses/${index}`),
+    committeesPaths:
+      value.committees == null
+        ? value.committees
+        : value.committees.map((_, index) => `/committees/${index}`),
+  };
+}
+function visitEvidenceRelationships(
+  value: z.infer<typeof EvidenceRawSchema>,
+  entities: CommitteeEntity[],
+): void {
+  value.witnesses?.forEach((witness, index) => {
+    const sourcePath = `/witnesses/${index}`;
+    entities.push(
+      SubmitterNodeSchema.parse({
+        ...witness,
+        kind: 'Submitter',
+        sourcePath,
+        memberInfoPath:
+          witness.memberInfo == null ? witness.memberInfo : `${sourcePath}/memberInfo`,
+        organisationsPaths:
+          witness.organisations == null
+            ? witness.organisations
+            : witness.organisations.map(
+                (_, organisationIndex) => `${sourcePath}/organisations/${organisationIndex}`,
+              ),
+      }),
+    );
+    if (witness.memberInfo != null)
+      visitMemberInfo(witness.memberInfo, `${sourcePath}/memberInfo`, entities);
+    witness.organisations?.forEach((organisation, organisationIndex) => {
+      visitOrganisation(organisation, `${sourcePath}/organisations/${organisationIndex}`, entities);
+    });
+  });
+  if (value.document != null) visitDocument(value.document, '/document', entities);
+  value.committees?.forEach((committee, index) => {
+    visitCommitteeSummary(committee, `/committees/${index}`, entities);
+  });
+}
+/** Normalize written submissions through the same recursive committee graph machinery. */
+export function normalizeWrittenEvidence(
+  value: z.infer<typeof WrittenEvidenceRawSchema>,
+): z.infer<typeof CommitteeRecordSchema> {
+  const entities: CommitteeEntity[] = [
+    WrittenEvidenceNodeSchema.parse({
+      ...value,
+      ...evidenceRelationships(value),
+      kind: 'WrittenEvidence',
+      committeeBusinessPath:
+        value.committeeBusiness == null ? value.committeeBusiness : '/committeeBusiness',
+      hcNumberPath: value.hcNumber == null ? value.hcNumber : '/hcNumber',
+    }),
+  ];
+  visitEvidenceRelationships(value, entities);
+  if (value.committeeBusiness != null)
+    visitCommitteeBusinessSummary(value.committeeBusiness, '/committeeBusiness', entities);
+  if (value.hcNumber != null) visitHouseNumber(value.hcNumber, '/hcNumber', entities);
+  return { recordId: String(value.id), recordType: 'written_evidence', rootPath: '', entities };
+}
+/** Normalize oral sessions, retaining each related business and its recursive metadata. */
+export function normalizeOralEvidence(
+  value: z.infer<typeof OralEvidenceRawSchema>,
+): z.infer<typeof CommitteeRecordSchema> {
+  const entities: CommitteeEntity[] = [
+    OralEvidenceNodeSchema.parse({
+      ...value,
+      ...evidenceRelationships(value),
+      kind: 'OralEvidence',
+      committeeBusinessesPaths:
+        value.committeeBusinesses == null
+          ? value.committeeBusinesses
+          : value.committeeBusinesses.map((_, index) => `/committeeBusinesses/${index}`),
+      hcNumbersPaths:
+        value.hcNumbers == null
+          ? value.hcNumbers
+          : value.hcNumbers.map((_, index) => `/hcNumbers/${index}`),
+    }),
+  ];
+  visitEvidenceRelationships(value, entities);
+  value.committeeBusinesses?.forEach((business, index) => {
+    visitCommitteeBusinessSummary(business, `/committeeBusinesses/${index}`, entities);
+  });
+  value.hcNumbers?.forEach((paper, index) => {
+    visitHouseNumber(paper, `/hcNumbers/${index}`, entities);
+  });
+  return { recordId: String(value.id), recordType: 'oral_evidence', rootPath: '', entities };
 }

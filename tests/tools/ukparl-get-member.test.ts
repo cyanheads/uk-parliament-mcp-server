@@ -430,20 +430,68 @@ describe('ukparl_get_member', () => {
     ])
       expect(text(result)).toContain(value);
   });
+  it.each(['profile', 'roles'] as const)(
+    'keeps explicit limit accepted for singular %s responses',
+    async (section) => {
+      const requests = installSection({});
+      const result = await runToolContract(ukparlGetMember, { memberId: '77', section, limit: 3 });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({ found: true, section });
+      expect(requests.length).toBe(section === 'profile' ? 1 : 2);
+    },
+  );
   it.each([
-    { section: 'interests' },
-    { section: 'voting' },
-    { section: 'profile', house: 'commons' },
-    { section: 'contact', category: 'representations' },
-    { section: 'roles', cursor: 'bad' },
-  ] as const)('rejects incompatible selector %j before I/O', async (input) => {
+    [{ section: 'interests' }, 'section=interests requires house=commons or house=lords.'],
+    [{ section: 'voting' }, 'section=voting requires house=commons or house=lords.'],
+    [
+      { section: 'profile', house: 'commons' },
+      'house is unsupported for section=profile; omit house or select interests or voting.',
+    ],
+    [
+      { section: 'contact', category: 'representations' },
+      'category is unsupported for section=contact; omit category or select roles.',
+    ],
+    [
+      { section: 'roles', cursor: 'bad' },
+      'cursor is unsupported for section=roles without category; select a category or omit cursor.',
+    ],
+    [
+      { section: 'profile', cursor: 'bad' },
+      'cursor is unsupported for section=profile; omit cursor.',
+    ],
+  ] as const)('rejects incompatible selector %j before I/O', async (input, message) => {
     const requests = installSection([]);
     const result = await runToolContract(ukparlGetMember, { memberId: '77', ...input });
     expect(result.structuredContent).toMatchObject({
-      error: { data: { reason: 'invalid_mode_arguments' } },
+      error: {
+        code: -32602,
+        message,
+        data: {
+          reason: 'invalid_mode_arguments',
+          recovery: {
+            hint: 'Repeat ukparl_get_member with house for interests or voting, category only for roles, and no collection cursor for profile or the role-category outline.',
+          },
+        },
+      },
     });
     expect(text(result)).toContain('ukparl_get_member');
     expect(text(result)).toContain('house');
+    expect(text(result)).toContain(message);
+    expect(requests).toEqual([]);
+  });
+  it('reports each incompatible member selector in deterministic order', async () => {
+    const requests = installSection([]);
+    const result = await runToolContract(ukparlGetMember, {
+      memberId: '77',
+      section: 'profile',
+      house: 'commons',
+      category: 'representations',
+      cursor: 'bad',
+    });
+    const message =
+      'house is unsupported for section=profile; omit house or select interests or voting. category is unsupported for section=profile; omit category or select roles. cursor is unsupported for section=profile; omit cursor.';
+    expect(result.structuredContent).toMatchObject({ error: { message } });
+    expect(text(result)).toContain(message);
     expect(requests).toEqual([]);
   });
   it('reconstructs oversized UTF-8 profile text losslessly and rejects changed source or selectors', async () => {

@@ -65,12 +65,16 @@ describe('collection cursors', () => {
       Buffer.from(JSON.stringify({ ...valid, origin: 'https://evil.test' })).toString('base64url'),
       encodeCursor({ ...valid, nativePage: 2, offset: 0 }),
       encodeCursor({ ...valid, offset: -1 }),
+      encodeCursor({ ...valid, offset: 2147483648 }),
     ]) {
       expect(() => readCollectionCursor(value, binding)).toThrow(
         expect.objectContaining({ data: expect.objectContaining({ reason: 'invalid_cursor' }) }),
       );
     }
     expect(decodeCursor(encodeCursor(valid), CollectionCursorSchema)).toEqual(valid);
+    expect(
+      readCollectionCursor(encodeCursor({ ...valid, offset: 2147483647 }), binding).offset,
+    ).toBe(2147483647);
   });
 });
 

@@ -15,6 +15,62 @@ afterEach(disposeParliamentHttp);
 
 describe('DivisionsService', () => {
   it.each(['commons', 'lords'] as const)(
+    'uses %s member wrappers without losing metadata',
+    async (house) => {
+      const requests = installDivisions(() =>
+        house === 'commons'
+          ? [
+              {
+                MemberId: 1,
+                MemberVotedAye: false,
+                MemberVotedNo: true,
+                MemberWasTeller: true,
+                PublishedDivision: commonsDivision(),
+              },
+            ]
+          : [
+              {
+                memberId: 1,
+                memberWasContent: false,
+                memberWasTeller: true,
+                publishedDivision: lordsDivision(),
+              },
+            ],
+      );
+      const http = getParliamentHttp();
+      using call = http.beginCall(createMockContext());
+      const result = await new DivisionsService(http).execute(
+        { house, mode: 'search', memberId: '1', limit: 5 },
+        call,
+      );
+      expect(requests[0]!.pathname).toBe(
+        house === 'commons' ? '/data/divisions.json/membervoting' : '/data/Divisions/membervoting',
+      );
+      expect(result.payload.items![0]).toMatchObject({
+        divisionId: '42',
+        memberVote: {
+          memberId: '1',
+          lobby: house === 'commons' ? 'no' : 'not_content',
+          wasTeller: true,
+        },
+      });
+      expect(result.payload.page).toEqual({ returned: 1, hasMore: false });
+    },
+  );
+  it('keeps no-member search summaries on the legacy route without a total', async () => {
+    const requests = installDivisions(() => [commonsDivision()]);
+    const http = getParliamentHttp();
+    using call = http.beginCall(createMockContext());
+    const result = await new DivisionsService(http).execute(
+      { house: 'commons', mode: 'search', limit: 5 },
+      call,
+    );
+    expect(requests[0]!.pathname).toBe('/data/divisions.json/search');
+    expect(result.payload.items![0]).toMatchObject({ divisionId: '42', noCount: null });
+    expect(result.payload.items![0]).not.toHaveProperty('memberVote');
+    expect(result.payload.page).toEqual({ returned: 1, hasMore: false });
+  });
+  it.each(['commons', 'lords'] as const)(
     'keeps %s IDs scoped to the selected source',
     async (house) => {
       const requests = installDivisions(() =>

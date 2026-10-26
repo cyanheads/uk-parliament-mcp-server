@@ -4,11 +4,7 @@
  */
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, validationError } from '@cyanheads/mcp-ts-core/errors';
-import {
-  advanceCollectionCursor,
-  invalidCursor,
-  readCollectionCursor,
-} from '@/services/parliament-http/parliament-cursors.js';
+import { pageFor, readCollectionCursor } from '@/services/parliament-http/parliament-cursors.js';
 import {
   DeliveryShape,
   deliverPayload,
@@ -32,7 +28,15 @@ import { getQuestions } from '@/services/questions/questions-service.js';
 
 const FiltersSchema = z.object({
   query: z.string().optional().describe('Content search terms.'),
+  uin: z
+    .string()
+    .optional()
+    .describe('Exact source UIN lookup string, potentially shared across sessions.'),
   memberId: z.string().optional().describe('Asking member ID.'),
+  answeringMemberId: z
+    .string()
+    .optional()
+    .describe('Answering member ID, distinct from asking member.'),
   answeringBodyIds: z
     .array(z.string().describe('Answering-body ID.'))
     .optional()
@@ -89,7 +93,7 @@ const OutputSchema = z.object({
 export const ukparlSearchQuestions = tool('ukparl_search_questions', {
   title: 'Search written questions',
   description:
-    'Search Westminster written questions and answer previews by text, asking member, House, answering body, answer state and dates. Use mode=detail with a returned questionId for complete question and answer HTML, corrections and attachment links. A UIN is not a questionId. Search includes all sessions and withdrawn questions. Follow collection cursors unchanged; use contentCursor for lossless oversized answers.',
+    'Search Westminster written questions and answer previews by text, exact UIN, asking or answering member, House, answering body, answer state and dates. An undated UIN returns candidates across sessions; narrow with tabling dates and retrieve mode=detail with a returned questionId for complete question and answer HTML, corrections and attachment links. A UIN is not a questionId and never determines House. Search includes all sessions and withdrawn questions. Follow collection cursors unchanged; use contentCursor for lossless oversized answers.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     mode: z
@@ -99,10 +103,16 @@ export const ukparlSearchQuestions = tool('ukparl_search_questions', {
     query: optionalText(z.string().trim().min(1)).describe(
       'Question or answer content terms; search only.',
     ),
+    uin: optionalText(z.string().trim().min(1)).describe(
+      'Exact UIN lookup string, such as 36068 or HL1234; preserves leading zeros. Search only; combine with tabling dates to narrow reused UINs.',
+    ),
     questionId: optionalText(IdSchema).describe(
       'Positive decimal Questions API ID required in detail; UIN is not this ID.',
     ),
     memberId: optionalText(IdSchema).describe('Asking Members API ID; search only.'),
+    answeringMemberId: optionalText(IdSchema).describe(
+      'Answering Members API ID; search only, independent of asking memberId.',
+    ),
     answeringBodyIds: z
       .array(IdSchema.describe('Official answering-body ID.'))
       .min(1)
@@ -267,7 +277,9 @@ export const ukparlSearchQuestions = tool('ukparl_search_questions', {
     const { mode, questionId } = input;
     const filters = FiltersSchema.parse({
       query: input.query,
+      uin: input.uin?.slice(0, 2).toLowerCase() === 'hl' ? `HL${input.uin.slice(2)}` : input.uin,
       memberId: input.memberId,
+      answeringMemberId: input.answeringMemberId,
       answeringBodyIds:
         input.answeringBodyIds === undefined
           ? undefined
@@ -279,18 +291,23 @@ export const ukparlSearchQuestions = tool('ukparl_search_questions', {
       answeredFrom: input.answeredFrom,
       answeredTo: input.answeredTo,
     });
-    if (
-      (mode === 'search' && questionId !== undefined) ||
-      (mode === 'detail' &&
-        (!questionId ||
-          Object.values(filters).some((value) => value !== undefined) ||
-          input.cursor !== undefined ||
-          input.limit !== undefined))
-    )
-      throw ctx.fail(
-        'invalid_mode_arguments',
-        'Use questionId alone in detail mode, or search filters without questionId.',
-      );
+    const conflicts: string[] = [];
+    if (mode === 'search' && questionId !== undefined)
+      conflicts.push('mode=search does not accept questionId; omit it or use mode=detail.');
+    if (mode === 'detail') {
+      if (!questionId)
+        conflicts.push(
+          'mode=detail requires questionId; use an ID returned by mode=search, not a UIN.',
+        );
+      const fields = Object.entries({ ...filters, cursor: input.cursor, limit: input.limit })
+        .filter(([, value]) => value !== undefined)
+        .map(([field]) => field);
+      if (fields.length)
+        conflicts.push(
+          `mode=detail does not accept ${fields.join(', ')}; remove these fields or use mode=search.`,
+        );
+    }
+    if (conflicts.length) throw ctx.fail('invalid_mode_arguments', conflicts.join(' '));
     validateDateRange(input.tabledFrom, input.tabledTo);
     validateDateRange(input.answeredFrom, input.answeredTo);
     const requestedLimit = input.limit ?? 10;
@@ -316,19 +333,13 @@ export const ukparlSearchQuestions = tool('ukparl_search_questions', {
     const notice = `${LICENCE_NOTICE} ${mode === 'search' ? 'Question and answer text are previews; retrieve mode=detail with questionId before quoting a complete answer.' : 'Complete source question and answer content; attachment metadata and links only, no files downloaded.'}${requestedLimit > 20 ? ` Requested limit ${requestedLimit} is capped at 20.` : ''}`;
     const enrichment = { applied, notice, ...(requestedLimit > 20 ? { requestedLimit } : {}) };
     const selection = { mode, questionId, filters, limit, cursor: input.cursor };
-    const cursor =
-      mode === 'search'
-        ? readCollectionCursor(input.cursor, {
-            source: 'questions',
-            selector: mode,
-            filters,
-            nativePageSize: limit,
-          })
-        : undefined;
-    if (cursor && cursor.offset > 2147483647) return invalidCursor();
-    using call = getParliamentHttp().beginCall(ctx);
     if (mode === 'detail') {
-      if (!questionId) throw ctx.fail('invalid_mode_arguments', 'Detail mode requires questionId.');
+      using call = getParliamentHttp().beginCall(ctx);
+      if (!questionId)
+        throw ctx.fail(
+          'invalid_mode_arguments',
+          'mode=detail requires questionId; use an ID returned by mode=search, not a UIN.',
+        );
       const response = await getQuestions().detail(call, questionId);
       const payload = response
         ? {
@@ -365,7 +376,13 @@ export const ukparlSearchQuestions = tool('ukparl_search_questions', {
         applyEnrichment: (values) => ctx.enrich(values),
       });
     }
-    if (!cursor) return invalidCursor();
+    const cursor = readCollectionCursor(input.cursor, {
+      source: 'questions',
+      selector: mode,
+      filters,
+      nativePageSize: limit,
+    });
+    using call = getParliamentHttp().beginCall(ctx);
     const response = await getQuestions().search(call, filters, cursor.offset, limit);
     if (
       response.data.results.length > limit ||
@@ -389,14 +406,7 @@ export const ukparlSearchQuestions = tool('ukparl_search_questions', {
       filters,
       source: response.source,
       items: items.slice(0, count),
-      page: {
-        returned: count,
-        total: response.data.totalResults,
-        hasMore: cursor.offset + count < response.data.totalResults,
-        ...(cursor.offset + count < response.data.totalResults
-          ? { nextCursor: advanceCollectionCursor(cursor, count) }
-          : {}),
-      },
+      page: pageFor(cursor, count, response.data.totalResults),
       ...(items.length === 0
         ? {
             guidance:

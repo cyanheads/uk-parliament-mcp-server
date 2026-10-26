@@ -2,6 +2,8 @@
  * @fileoverview Division contracts, lossless pagination and recovery on both MCP surfaces.
  * @module tests/tools/ukparl-search-divisions.test
  */
+
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ukparlSearchDivisions } from '@/mcp-server/tools/definitions/ukparl-search-divisions.tool.js';
@@ -18,6 +20,7 @@ import {
   installDivisions,
   lordsDivision,
 } from '../services/divisions/divisions-fixtures.js';
+import { renderedPayload } from './rendered-payload.js';
 
 type Result = Awaited<ReturnType<typeof runToolContract>>;
 type Output = ReturnType<typeof ukparlSearchDivisions.output.parse>;
@@ -31,15 +34,7 @@ function output(result: Result): Output {
   expect(result.isError).not.toBe(true);
   expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(24_000);
   const value = ukparlSearchDivisions.output.parse(result.structuredContent);
-  const scalars = [...text(result).matchAll(/(`{3,})json\n([^\n]*)\n\1/g)].map((match) =>
-    JSON.parse(match[2]!),
-  );
-  function visit(node: unknown): void {
-    if (node !== null && typeof node === 'object')
-      for (const child of Object.values(node)) visit(child);
-    else if (node !== undefined) expect(scalars).toContainEqual(node);
-  }
-  visit(result.structuredContent);
+  expect(renderedPayload(text(result))).toEqual(result.structuredContent);
   return value;
 }
 function error(result: Result, reason: string) {
@@ -100,13 +95,174 @@ async function reconstruct(
 
 afterEach(disposeParliamentHttp);
 describe('ukparl_search_divisions', () => {
+  it.each([
+    { MemberId: 1, MemberVotedAye: true, MemberVotedNo: true, MemberWasTeller: false },
+    { MemberId: 1, MemberVotedAye: false, MemberVotedNo: false, MemberWasTeller: false },
+    { MemberId: 1, MemberVotedAye: true, MemberWasTeller: false },
+    { MemberId: 2, MemberVotedAye: true, MemberVotedNo: false, MemberWasTeller: false },
+  ])('never invents a Commons vote from malformed member flags %j', async (wrapper) => {
+    installDivisions(() => [{ ...wrapper, PublishedDivision: commonsDivision() }]);
+    const result = await runToolContract(ukparlSearchDivisions, {
+      house: 'commons',
+      memberId: '1',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.ValidationError },
+    });
+    expect(result.structuredContent).not.toHaveProperty('items');
+  });
+  it.each([
+    { memberId: 1, memberWasContent: null, memberWasTeller: true },
+    { memberId: 1, memberWasContent: true },
+    { memberId: 2, memberWasContent: false, memberWasTeller: false },
+  ])('rejects malformed Lords member wrappers %j', async (wrapper) => {
+    installDivisions(() => [{ ...wrapper, publishedDivision: lordsDivision() }]);
+    const result = await runToolContract(ukparlSearchDivisions, { house: 'lords', memberId: '1' });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.ValidationError },
+    });
+    expect(result.structuredContent).not.toHaveProperty('items');
+  });
+  it.each(['commons', 'lords'] as const)(
+    'keeps empty %s member-voting pages honest at the cap and past the end',
+    async (house) => {
+      const requests = installDivisions(() => []);
+      const selection = { house, mode: 'search', memberId: '1', limit: 10 };
+      const first = output(
+        await runToolContract(ukparlSearchDivisions, { house, memberId: '1', limit: 999 }),
+      );
+      expect(first.page).toEqual({ returned: 0, hasMore: false });
+      expect(first.items).toEqual([]);
+      const cursor = advanceCollectionCursor(
+        readCollectionCursor(undefined, {
+          source: `${house}_votes`,
+          selector: 'search',
+          filters: selection,
+          nativePageSize: 10,
+        }),
+        99,
+      );
+      const past = output(
+        await runToolContract(ukparlSearchDivisions, { house, memberId: '1', limit: 999, cursor }),
+      );
+      expect(past.page).toEqual({ returned: 0, hasMore: false });
+      expect(
+        requests.at(-1)!.searchParams.get(house === 'commons' ? 'queryParameters.skip' : 'skip'),
+      ).toBe('99');
+      expect(requests).toHaveLength(2);
+    },
+  );
+  it('reconstructs a member-voting search summary and nested memberVote without losing source metadata', async () => {
+    const title = '<p>文 and source HTML</p>'.repeat(1600);
+    installDivisions(() => [
+      {
+        MemberId: 1,
+        MemberVotedAye: false,
+        MemberVotedNo: true,
+        MemberWasTeller: true,
+        PublishedDivision: { ...commonsDivision(), Title: title },
+      },
+    ]);
+    const input = { house: 'commons', memberId: '1' };
+    const first = output(await runToolContract(ukparlSearchDivisions, input));
+    expect(first.delivery).toBe('outline');
+    expect(await reconstruct(input, first)).toMatchObject({
+      items: [
+        {
+          title,
+          noCount: null,
+          memberVote: { memberId: '1', lobby: 'no', wasTeller: true },
+          source: { api: 'commons_votes', url: expect.stringContaining('/membervoting?') },
+        },
+      ],
+    });
+  });
+  it.each(['commons', 'lords'] as const)(
+    'retains %s member votes across repeated page re-slices and cursor bindings',
+    async (house) => {
+      const rows = Array.from({ length: 5 }, (_, index) =>
+        house === 'commons'
+          ? {
+              MemberId: 1,
+              MemberVotedAye: true,
+              MemberVotedNo: false,
+              MemberWasTeller: false,
+              PublishedDivision: { ...commonsDivision(42 + index), Title: '文'.repeat(1200) },
+            }
+          : {
+              memberId: 1,
+              memberWasContent: true,
+              memberWasTeller: false,
+              publishedDivision: { ...lordsDivision(42 + index), title: '文'.repeat(1200) },
+            },
+      );
+      const requests = installDivisions((url) => {
+        const prefix = house === 'commons' ? 'queryParameters.' : '';
+        const skip = Number(url.searchParams.get(`${prefix}skip`));
+        const take = Number(url.searchParams.get(`${prefix}take`));
+        return rows.slice(skip, skip + take);
+      });
+      const ids: string[] = [];
+      let cursor: string | undefined;
+      do {
+        const result = output(
+          await runToolContract(ukparlSearchDivisions, {
+            house,
+            memberId: '1',
+            limit: 999,
+            ...(cursor ? { cursor } : {}),
+          }),
+        );
+        expect(requests.at(-1)!.origin).toBe(
+          house === 'commons'
+            ? 'https://commonsvotes-api.parliament.uk'
+            : 'https://lordsvotes-api.parliament.uk',
+        );
+        expect(result.page).not.toHaveProperty('total');
+        for (const row of result.items!) {
+          ids.push(row.divisionId);
+          expect(row.memberVote).toEqual({
+            memberId: '1',
+            lobby: house === 'commons' ? 'aye' : 'content',
+            wasTeller: false,
+          });
+        }
+        cursor = result.page!.nextCursor;
+        if (cursor)
+          error(
+            await runToolContract(ukparlSearchDivisions, {
+              house,
+              memberId: '2',
+              limit: 999,
+              cursor,
+            }),
+            'invalid_cursor',
+          );
+      } while (cursor);
+      expect(ids).toEqual(['42', '43', '44', '45', '46']);
+      expect(requests.length).toBeGreaterThan(2);
+    },
+  );
   it.each(['commons', 'lords'] as const)(
     'uses the exact %s search query and limit+1 without invented totals',
     async (house) => {
       const requests = installDivisions(() =>
         house === 'commons'
-          ? [commonsDivision(42), commonsDivision(43), commonsDivision(44)]
-          : [lordsDivision(42), lordsDivision(43), lordsDivision(44)],
+          ? [42, 43, 44].map((id) => ({
+              MemberId: 1,
+              MemberVotedAye: id !== 43,
+              MemberVotedNo: id === 43,
+              MemberWasTeller: id === 42,
+              PublishedDivision: commonsDivision(id),
+            }))
+          : [42, 43, 44].map((id) => ({
+              memberId: 1,
+              memberWasContent: id !== 43,
+              memberWasTeller: id === 42,
+              publishedDivision: lordsDivision(id),
+            })),
       );
       const result = output(
         await runToolContract(ukparlSearchDivisions, {
@@ -124,7 +280,7 @@ describe('ukparl_search_divisions', () => {
         house === 'commons' ? 'commonsvotes-api.parliament.uk' : 'lordsvotes-api.parliament.uk',
       );
       expect(url.pathname).toBe(
-        house === 'commons' ? '/data/divisions.json/search' : '/data/Divisions/search',
+        house === 'commons' ? '/data/divisions.json/membervoting' : '/data/Divisions/membervoting',
       );
       expect(Object.fromEntries(url.searchParams)).toEqual(
         house === 'commons'
@@ -148,6 +304,10 @@ describe('ukparl_search_divisions', () => {
             },
       );
       expect(result.items!.map((row) => row.divisionId)).toEqual(['42', '43']);
+      expect(result.items!.map((row) => row.memberVote)).toEqual([
+        { memberId: '1', lobby: house === 'commons' ? 'aye' : 'content', wasTeller: true },
+        { memberId: '1', lobby: house === 'commons' ? 'no' : 'not_content', wasTeller: false },
+      ]);
       expect(result.page).toMatchObject({ returned: 2, hasMore: true });
       expect(result.page).not.toHaveProperty('total');
       expect(result).not.toHaveProperty('totalCount');
@@ -337,6 +497,54 @@ describe('ukparl_search_divisions', () => {
   ])('rejects invalid combinations before exchange: %j', async (input) => {
     const requests = installDivisions(() => []);
     error(await runToolContract(ukparlSearchDivisions, input), 'invalid_mode');
+    expect(requests).toEqual([]);
+  });
+
+  it.each([
+    [{ mode: 'detail' }, 'mode=detail requires divisionId; select an ID from search results.'],
+    [
+      { divisionId: '42' },
+      'mode=search does not accept divisionId; omit it or select detail, voters or party_totals.',
+    ],
+    [
+      {
+        mode: 'detail',
+        divisionId: '42',
+        query: 'x',
+        memberId: '3',
+        startDate: '2026-01-01',
+        endDate: '2026-01-02',
+      },
+      'mode=detail does not accept query, memberId, startDate, endDate; remove these fields or use mode=search.',
+    ],
+    [
+      { party: 'x', lobby: 'aye' },
+      'mode=search does not accept party, lobby; remove these fields or use mode=voters.',
+    ],
+    [
+      { mode: 'detail', divisionId: '42', cursor: 'x', limit: 1 },
+      'mode=detail does not accept cursor, limit; omit collection pagination.',
+    ],
+    [
+      { mode: 'voters', divisionId: '42', lobby: 'content' },
+      'lobby=content is incompatible with house=commons; use aye, no or not_recorded.',
+    ],
+    [
+      { house: 'lords', mode: 'voters', divisionId: '42', lobby: 'aye' },
+      'lobby=aye is incompatible with house=lords; use content or not_content.',
+    ],
+    [
+      { mode: 'detail', query: 'x', party: 'y', limit: 1 },
+      'mode=detail requires divisionId; select an ID from search results. mode=detail does not accept query; remove these fields or use mode=search. mode=detail does not accept party; remove these fields or use mode=voters. mode=detail does not accept limit; omit collection pagination.',
+    ],
+  ])('names division conflicts on both surfaces: %j', async (fields, message) => {
+    const requests = installDivisions(() => []);
+    const result = await runToolContract(ukparlSearchDivisions, { house: 'commons', ...fields });
+    error(result, 'invalid_mode');
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.InvalidParams, message },
+    });
+    expect(text(result)).toContain(message);
     expect(requests).toEqual([]);
   });
 

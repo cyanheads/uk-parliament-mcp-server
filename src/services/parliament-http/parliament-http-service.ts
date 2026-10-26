@@ -16,7 +16,7 @@ import { fetchWithTimeout, httpErrorFromResponse, withRetry } from '@cyanheads/m
 import { type Api, LICENCE_URL, type Source } from './parliament-models.js';
 
 /** Verified origins; caller input can never select a host. */
-export const PARLIAMENT_ORIGINS = {
+const PARLIAMENT_ORIGINS = {
   bills: 'https://bills-api.parliament.uk',
   members: 'https://members-api.parliament.uk',
   commons_votes: 'https://commonsvotes-api.parliament.uk',
@@ -312,25 +312,20 @@ export class ParliamentHttpService {
       async (attempt) => {
         call.signal.throwIfAborted();
         await this.acquire(queue, attempt.signal);
-        const remainingMs = call.deadlineAt - this.clock.now();
+        const attemptMs = Math.max(0, Math.min(12_000, call.deadlineAt - this.clock.now()));
         const controller = new AbortController();
         const timer = this.clock.setTimeout(
           () =>
             controller.abort(
               timeout('Parliament attempt timed out.', { reason: 'attempt_timeout' }),
             ),
-          Math.max(0, Math.min(12_000, remainingMs)),
+          attemptMs,
         );
         const signal = AbortSignal.any([attempt.signal, controller.signal]);
         let responseRead = false;
         try {
           signal.throwIfAborted();
-          const response = await this.exchangeResponse(
-            url,
-            Math.max(0, Math.min(12_000, remainingMs)),
-            call.context,
-            signal,
-          );
+          const response = await this.exchangeResponse(url, attemptMs, call.context, signal);
           if (!response.ok)
             throw this.httpFailure(
               await httpErrorFromResponse(response, {
@@ -406,6 +401,30 @@ export class ParliamentHttpService {
         licenceUrl: LICENCE_URL,
       },
     };
+  }
+
+  /** `get` for a single entity: an upstream 404 resolves to `undefined`; every other failure propagates. */
+  async find<TSchema extends z.ZodType>(
+    call: ParliamentCall,
+    api: Api,
+    path: string,
+    schema: TSchema,
+    query: ParliamentQuery = {},
+    allowedKeys: readonly string[] = [],
+  ): Promise<ParliamentResponse<z.output<TSchema>> | undefined> {
+    try {
+      return await this.get(call, api, path, schema, query, allowedKeys);
+    } catch (error) {
+      call.signal.throwIfAborted();
+      if (
+        error instanceof McpError &&
+        (error.code === JsonRpcErrorCode.NotFound ||
+          error.data?.status === 404 ||
+          error.data?.statusCode === 404)
+      )
+        return;
+      throw error;
+    }
   }
 
   /** Cancel active calls and remove all queued waiters/timers during server teardown. */

@@ -19,6 +19,7 @@ import {
   initParliamentHttp,
 } from '@/services/parliament-http/parliament-http-service.js';
 import { contribution, installHansard, spoken } from '../services/hansard/hansard-fixtures.js';
+import { renderedPayload } from './rendered-payload.js';
 
 type Result = Awaited<ReturnType<typeof runToolContract>>;
 type Output = ReturnType<typeof ukparlSearchHansard.output.parse>;
@@ -32,15 +33,7 @@ function output(result: Result): Output {
   expect(result.isError).not.toBe(true);
   expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(24_000);
   const value = ukparlSearchHansard.output.parse(result.structuredContent);
-  const scalars = [...text(result).matchAll(/(`{3,})json\n([^\n]*)\n\1/g)].map((match) =>
-    JSON.parse(match[2]!),
-  );
-  function visit(node: unknown): void {
-    if (node !== null && typeof node === 'object')
-      for (const child of Object.values(node)) visit(child);
-    else if (node !== undefined) expect(scalars).toContainEqual(node);
-  }
-  visit(result.structuredContent);
+  expect(renderedPayload(text(result))).toEqual(result.structuredContent);
   return value;
 }
 function error(result: Result, reason: string) {

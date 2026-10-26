@@ -12,6 +12,7 @@ import {
   business,
   businessDetail,
   committeeDetail,
+  evidence,
   installCommittees,
   membership,
   page,
@@ -19,6 +20,7 @@ import {
   reconstruct,
   withFullCommitteeQueue,
 } from '../services/committees/committees-fixtures.js';
+import { renderedPayload } from './rendered-payload.js';
 
 type Result = Awaited<ReturnType<typeof runToolContract>>;
 const text = (result: Result) =>
@@ -27,29 +29,18 @@ const text = (result: Result) =>
     .map((block) => block.text)
     .join('\n');
 
-/** Check each scalar's exact reversible JSON value in the rendered consumption path. */
-function assertRendered(value: unknown, rendered: string, path = ''): void {
-  if (value !== null && typeof value === 'object') {
-    for (const [key, child] of Object.entries(value))
-      if (child !== undefined)
-        assertRendered(
-          child,
-          rendered,
-          `${path}/${key.replaceAll('~', '~0').replaceAll('/', '~1')}`,
-        );
-  } else {
-    const lines = rendered.split('\n');
-    const index = lines.indexOf(path);
-    expect(index, path).toBeGreaterThanOrEqual(0);
-    expect(lines[index + 1], path).toMatch(/^`{3,}json$/);
-    expect(JSON.parse(lines[index + 2]!), path).toStrictEqual(value);
-  }
+/** Decode the complete public JSON representation and compare every payload field. */
+function assertRendered(value: unknown, rendered: string): void {
+  expect(
+    JSON.parse(JSON.stringify(ukparlGetCommittee.output.parse(renderedPayload(rendered)))),
+  ).toStrictEqual(JSON.parse(JSON.stringify(value)));
 }
 
 /** Follow the public recursive retrieval contract and reconstruct using its descriptors. */
 async function retrieve(input: Record<string, unknown>, first: Result): Promise<unknown> {
   let output = ukparlGetCommittee.output.parse(first.structuredContent);
   let currentResult = first;
+  expect(renderedPayload(text(first))).toEqual(JSON.parse(JSON.stringify(first.structuredContent)));
   expect(first.isError).not.toBe(true);
   expect(Buffer.byteLength(JSON.stringify(first))).toBeLessThanOrEqual(24000);
   if (output.delivery === 'full') {
@@ -61,6 +52,9 @@ async function retrieve(input: Record<string, unknown>, first: Result): Promise<
   const entries = new Map<string, unknown>();
   while (true) {
     const current = output.contentPage!;
+    expect(renderedPayload(text(currentResult))).toEqual(
+      JSON.parse(JSON.stringify(currentResult.structuredContent)),
+    );
     expect(current.path).toBe(initial.path);
     assertRendered(output, text(currentResult));
     if (current.fragment !== undefined) {
@@ -68,11 +62,16 @@ async function retrieve(input: Record<string, unknown>, first: Result): Promise<
       fragments += current.fragment;
     }
     for (const entry of current.entries ?? []) {
-      const child = await runToolContract(ukparlGetCommittee, {
-        ...input,
-        contentCursor: entry.contentCursor,
-      });
-      const value = await retrieve(input, child);
+      const value =
+        entry.jsonValue === undefined
+          ? await retrieve(
+              input,
+              await runToolContract(ukparlGetCommittee, {
+                ...input,
+                contentCursor: entry.contentCursor,
+              }),
+            )
+          : JSON.parse(entry.jsonValue);
       expect(Buffer.byteLength(JSON.stringify(value))).toBe(entry.sizeBytes);
       entries.set(
         entry.path
@@ -104,6 +103,710 @@ afterEach(() => {
 });
 
 describe('ukparl_get_committee', () => {
+  it('characterizes accepted neighboring selectors before diagnostic changes', async () => {
+    const requests = installCommittees((url) =>
+      url.pathname.endsWith('/31') ? { id: 31 } : page([]),
+    );
+    const detail = await runToolContract(ukparlGetCommittee, {
+      mode: 'inquiry',
+      businessId: '31',
+      committeeId: '',
+      limit: undefined,
+      cursor: '',
+    });
+    const global = await runToolContract(ukparlGetCommittee, {
+      mode: 'inquiries',
+      query: 'ab',
+      acceptingEvidence: false,
+    });
+    expect(detail.isError).not.toBe(true);
+    expect(detail.structuredContent).toMatchObject({ found: true, filters: { businessId: '31' } });
+    expect(global.isError).not.toBe(true);
+    expect(global.structuredContent).toMatchObject({
+      filters: { query: 'ab', acceptingEvidence: false },
+    });
+    expect(requests).toHaveLength(2);
+  });
+  it.each([
+    [{ mode: 'detail' }, 'mode=detail requires committeeId'],
+    [{ mode: 'members' }, 'mode=members requires committeeId'],
+    [{ mode: 'inquiry', committeeId: '11' }, 'mode=inquiry requires businessId'],
+    [{ mode: 'publications', businessId: '31' }, 'mode=publications requires committeeId'],
+    [{ mode: 'publication', businessId: '31' }, 'mode=publication requires publicationId'],
+    [{ mode: 'evidence', evidenceType: 'written' }, 'mode=evidence requires businessId'],
+    [
+      { mode: 'evidence', businessId: '31' },
+      'mode=evidence requires evidenceType=written or evidenceType=oral',
+    ],
+    [{ mode: 'evidence_detail', evidenceType: 'oral' }, 'mode=evidence_detail requires evidenceId'],
+    [
+      { mode: 'evidence_detail', evidenceId: '91' },
+      'mode=evidence_detail requires evidenceType=written or evidenceType=oral',
+    ],
+    [
+      { mode: 'members', committeeId: '11', house: 'commons' },
+      'house is unsupported for mode=members; omit house or select mode=search',
+    ],
+    [
+      { mode: 'search', membership: 'current' },
+      'membership is unsupported for mode=search; omit membership or select mode=members',
+    ],
+    [
+      { mode: 'inquiries', query: 'x' },
+      'query in mode=inquiries requires at least 2 characters; supply a longer query or omit query',
+    ],
+    [
+      { mode: 'publications', committeeId: '11', query: 'x' },
+      'query in mode=publications requires at least 2 characters; supply a longer query or omit query',
+    ],
+    [
+      { mode: 'publication', publicationId: '51', limit: 1 },
+      'limit is unsupported for singular mode=publication; omit limit',
+    ],
+    [
+      { mode: 'evidence_detail', evidenceId: '91', evidenceType: 'oral', cursor: 'x' },
+      'cursor is unsupported for singular mode=evidence_detail; omit cursor',
+    ],
+    [
+      { mode: 'search', status: 'Open' },
+      'status="Open" is incompatible with mode=search; use Current, Former or All',
+    ],
+    [
+      { mode: 'inquiries', status: 'Current' },
+      'status="Current" is incompatible with mode=inquiries; use Open or Closed',
+    ],
+    [
+      { mode: 'inquiries', sortOrder: 'ResponseDateAscending' },
+      'sortOrder="ResponseDateAscending" is incompatible with mode=inquiries; use DateOpenedNewest, DateOpenedOldest, PublicationDateAscending or PublicationDateDescending',
+    ],
+    [
+      { mode: 'publications', committeeId: '11', sortOrder: 'DateOpenedNewest' },
+      'sortOrder="DateOpenedNewest" is incompatible with mode=publications; use PublicationDateAscending, PublicationDateDescending, ResponseDateAscending or ResponseDateDescending',
+    ],
+  ] as const)(
+    'names the committee diagnostic and concrete repair for %j',
+    async (input, message) => {
+      const requests = installCommittees(() => page([]));
+      const result = await runToolContract(ukparlGetCommittee, input);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.InvalidParams,
+          message: expect.stringContaining(message),
+          data: {
+            reason: 'invalid_mode_arguments',
+            recovery: {
+              hint: 'Repeat ukparl_get_committee using only the fields documented for the selected mode.',
+            },
+          },
+        },
+      });
+      expect(text(result)).toContain(message);
+      expect(text(result)).toContain('invalid_mode_arguments');
+      expect(text(result)).toContain('fields documented for the selected mode');
+      expect(requests).toHaveLength(0);
+    },
+  );
+  it('reports all committee conflicts in deterministic order', async () => {
+    const requests = installCommittees(() => page([]));
+    const input = {
+      mode: 'evidence_detail',
+      committeeId: '11',
+      businessId: '31',
+      query: 'x',
+      limit: 1,
+      cursor: 'x',
+    } as const;
+    const expected =
+      'mode=evidence_detail requires evidenceId; supply evidenceId from mode=evidence with the same evidenceType. mode=evidence_detail requires evidenceType=written or evidenceType=oral; select the evidence namespace. query is unsupported for mode=evidence_detail; omit query or select mode=search, inquiries or publications. committeeId is unsupported for mode=evidence_detail; omit committeeId or select mode=detail, members, inquiries or publications. businessId is unsupported for mode=evidence_detail; omit businessId or select mode=inquiry, publications or evidence. cursor is unsupported for singular mode=evidence_detail; omit cursor. limit is unsupported for singular mode=evidence_detail; omit limit.';
+    const result = await runToolContract(ukparlGetCommittee, input);
+    expect(result.structuredContent).toMatchObject({
+      error: { message: expected, data: { reason: 'invalid_mode_arguments' } },
+    });
+    expect(text(result)).toContain(expected);
+    expect(requests).toHaveLength(0);
+  });
+  it('passes exact business filters globally and preserves false as unrestricted source selection', async () => {
+    const requests = installCommittees(() => page([{ id: 31, type: { id: 2, isInquiry: false } }]));
+    const input = {
+      mode: 'inquiries',
+      status: 'Open',
+      acceptingEvidence: false,
+      openedFrom: '2026-01-01',
+      openedTo: '2026-10-01',
+      sortOrder: 'DateOpenedNewest',
+    } as const;
+    const result = await runToolContract(ukparlGetCommittee, input);
+    expect(result.isError).not.toBe(true);
+    expect([...requests[0]!.searchParams]).toEqual([
+      ['Status', 'Open'],
+      ['CurrentlyAcceptingEvidence', 'false'],
+      ['DateFrom', '2026-01-01'],
+      ['DateTo', '2026-10-01'],
+      ['SortOrder', 'DateOpenedNewest'],
+      ['ShowOnWebsiteOnly', 'true'],
+      ['Skip', '0'],
+      ['Take', '20'],
+    ]);
+    const output = ukparlGetCommittee.output.parse(result.structuredContent);
+    expect(JSON.parse(JSON.stringify(output.filters))).toEqual({
+      status: 'Open',
+      acceptingEvidence: false,
+      openedFrom: '2026-01-01',
+      openedTo: '2026-10-01',
+      sortOrder: 'DateOpenedNewest',
+    });
+    expect(reconstruct(output.items![0]!)).toEqual({ id: 31, type: { id: 2, isInquiry: false } });
+    assertRendered(output, text(result));
+  });
+  it('serializes publication IDs repeatedly and retains ordered source results', async () => {
+    const requests = installCommittees(() =>
+      page([
+        { id: 52, publicationStartDate: null },
+        { id: 51, publicationStartDate: null },
+      ]),
+    );
+    const input = {
+      mode: 'publications',
+      committeeId: '11',
+      publicationTypeIds: ['001', '2'],
+      publishedFrom: '2026-01-01',
+      publishedTo: '2026-10-01',
+      sortOrder: 'ResponseDateDescending',
+    } as const;
+    const result = await runToolContract(ukparlGetCommittee, input);
+    expect(result.isError).not.toBe(true);
+    expect([...requests[0]!.searchParams]).toEqual([
+      ['CommitteeId', '11'],
+      ['SortOrder', 'ResponseDateDescending'],
+      ['PublicationTypeIds', '1'],
+      ['PublicationTypeIds', '2'],
+      ['StartDate', '2026-01-01'],
+      ['EndDate', '2026-10-01'],
+      ['ShowOnWebsiteOnly', 'true'],
+      ['Skip', '0'],
+      ['Take', '20'],
+    ]);
+    const output = ukparlGetCommittee.output.parse(result.structuredContent);
+    expect(output.items!.map((item) => item.recordId)).toEqual(['52', '51']);
+    expect(output.filters).toMatchObject({ publicationTypeIds: ['1', '2'] });
+    assertRendered(output, text(result));
+  });
+  it.each(['Current', 'Former', 'All'])(
+    'passes committee search status %s without inferring a complement',
+    async (status) => {
+      const requests = installCommittees(() => page([]));
+      const result = await runToolContract(ukparlGetCommittee, { status });
+      expect(result.isError).not.toBe(true);
+      expect(requests[0]!.searchParams.get('CommitteeStatus')).toBe(status);
+      const output = ukparlGetCommittee.output.parse(result.structuredContent);
+      expect(output.filters).toMatchObject({ status });
+      assertRendered(output, text(result));
+    },
+  );
+  it.each([
+    ['inquiries', 'DateOpenedNewest'],
+    ['inquiries', 'DateOpenedOldest'],
+    ['inquiries', 'PublicationDateAscending'],
+    ['inquiries', 'PublicationDateDescending'],
+    ['publications', 'PublicationDateAscending'],
+    ['publications', 'PublicationDateDescending'],
+    ['publications', 'ResponseDateAscending'],
+    ['publications', 'ResponseDateDescending'],
+  ] as const)('passes %s ordering %s unchanged, including source ties', async (mode, sortOrder) => {
+    const raw = [{ id: 32 }, { id: 31 }, { id: 33 }];
+    const requests = installCommittees(() => page(raw));
+    const result = await runToolContract(ukparlGetCommittee, {
+      mode,
+      committeeId: '11',
+      sortOrder,
+    });
+    expect(result.isError).not.toBe(true);
+    expect(requests[0]!.searchParams.get('SortOrder')).toBe(sortOrder);
+    const output = ukparlGetCommittee.output.parse(result.structuredContent);
+    expect(output.items!.map(reconstruct)).toStrictEqual(raw);
+    assertRendered(output, text(result));
+  });
+  it.each([true, false])(
+    'preserves acceptingEvidence=%s and source Open/Closed states',
+    async (acceptingEvidence) => {
+      const requests = installCommittees(() => page([]));
+      const result = await runToolContract(ukparlGetCommittee, {
+        mode: 'inquiries',
+        status: 'Closed',
+        acceptingEvidence,
+      });
+      expect(result.isError).not.toBe(true);
+      expect(requests[0]!.searchParams.get('CurrentlyAcceptingEvidence')).toBe(
+        String(acceptingEvidence),
+      );
+      expect(requests[0]!.searchParams.get('Status')).toBe('Closed');
+      assertRendered(ukparlGetCommittee.output.parse(result.structuredContent), text(result));
+    },
+  );
+  it('omits blank new selectors and preserves existing source defaults', async () => {
+    const requests = installCommittees(() => page([]));
+    const result = await runToolContract(ukparlGetCommittee, {
+      mode: 'publications',
+      committeeId: '11',
+      status: ' ',
+      openedFrom: '',
+      openedTo: '',
+      sortOrder: '',
+      publishedFrom: '',
+      publishedTo: '',
+      publicationTypeIds: [],
+    });
+    expect(result.isError).not.toBe(true);
+    expect([...requests[0]!.searchParams]).toEqual([
+      ['CommitteeId', '11'],
+      ['ShowOnWebsiteOnly', 'true'],
+      ['Skip', '0'],
+      ['Take', '20'],
+    ]);
+    expect(
+      JSON.parse(JSON.stringify(ukparlGetCommittee.output.parse(result.structuredContent).filters)),
+    ).toEqual({ committeeId: '11' });
+  });
+  it.each([
+    { mode: 'search', status: 'Open' },
+    { mode: 'search', sortOrder: 'DateOpenedNewest' },
+    { mode: 'inquiries', status: 'Current' },
+    { mode: 'inquiries', sortOrder: 'ResponseDateAscending' },
+    { mode: 'inquiries', publishedFrom: '2026-01-01' },
+    { mode: 'inquiries', publicationTypeIds: ['1'] },
+    { mode: 'publications', committeeId: '11', sortOrder: 'DateOpenedNewest' },
+    { mode: 'publications', committeeId: '11', openedTo: '2026-01-01' },
+    { mode: 'publications', committeeId: '11', acceptingEvidence: false },
+    { mode: 'evidence', businessId: '31', evidenceType: 'written', status: 'Open' },
+    {
+      mode: 'evidence_detail',
+      evidenceId: '91',
+      evidenceType: 'oral',
+      sortOrder: 'PublicationDateAscending',
+    },
+    { mode: 'detail', committeeId: '11', publishedTo: '2026-01-01' },
+  ] as const)(
+    'rejects new wrong-mode selections %j with declared recovery before I/O',
+    async (input) => {
+      const requests = installCommittees(() => page([]));
+      const result = await runToolContract(ukparlGetCommittee, input);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.InvalidParams,
+          data: {
+            reason: 'invalid_mode_arguments',
+            recovery: { hint: expect.stringContaining('fields documented') },
+          },
+        },
+      });
+      expect(text(result)).toContain('invalid_mode_arguments');
+      expect(text(result)).toContain('fields documented');
+      expect(requests).toHaveLength(0);
+    },
+  );
+  it.each([
+    { mode: 'inquiries', openedFrom: '2026-02-01', openedTo: '2026-01-01' },
+    {
+      mode: 'publications',
+      committeeId: '11',
+      publishedFrom: '2026-02-01',
+      publishedTo: '2026-01-01',
+    },
+  ] as const)(
+    'rejects reversed date ranges %j with declared recovery before I/O',
+    async (input) => {
+      const requests = installCommittees(() => page([]));
+      const result = await runToolContract(ukparlGetCommittee, input);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: JsonRpcErrorCode.InvalidParams,
+          data: {
+            reason: 'invalid_date_range',
+            recovery: { hint: expect.stringContaining('starting date') },
+          },
+        },
+      });
+      expect(text(result)).toContain('invalid_date_range');
+      expect(text(result)).toContain('starting date');
+      expect(requests).toHaveLength(0);
+    },
+  );
+  it.each([
+    { mode: 'inquiries', openedFrom: '2026-02-30' },
+    { mode: 'inquiries', openedTo: '2026-1-01' },
+    { mode: 'inquiries', acceptingEvidence: 'not-a-boolean' },
+    { mode: 'publications', committeeId: '11', publishedFrom: '2025-02-29' },
+    { mode: 'publications', committeeId: '11', publishedTo: '2026-04-31' },
+    { mode: 'publications', committeeId: '11', publicationTypeIds: ['0'] },
+    { mode: 'publications', committeeId: '11', publicationTypeIds: ['1', '2147483648'] },
+    { mode: 'publications', committeeId: '11', publicationTypeIds: ['1&PublicationTypeIds=2'] },
+    { mode: 'publications', committeeId: '11', publicationTypeIds: [1.1] },
+  ])('rejects malformed source filter %j before I/O', async (input) => {
+    const requests = installCommittees(() => page([]));
+    const result = await runToolContract(
+      ukparlGetCommittee,
+      Object.fromEntries(Object.entries(input)),
+    );
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.InvalidParams },
+    });
+    expect(requests).toHaveLength(0);
+  });
+  it.each([
+    [{ mode: 'inquiries', acceptingEvidence: 'false' }, 'CurrentlyAcceptingEvidence', 'false'],
+    [
+      { mode: 'publications', committeeId: '11', publicationTypeIds: [1] },
+      'PublicationTypeIds',
+      '1',
+    ],
+  ] as const)('retains framework representation repair for %j', async (input, key, expected) => {
+    expect(ukparlGetCommittee.input.safeParse(input).success).toBe(false);
+    const requests = installCommittees(() => page([]));
+    const result = await runToolContract(
+      ukparlGetCommittee,
+      Object.fromEntries(Object.entries(input)),
+    );
+    expect(result.isError).not.toBe(true);
+    expect(requests[0]!.searchParams.get(key)).toBe(expected);
+    assertRendered(ukparlGetCommittee.output.parse(result.structuredContent), text(result));
+  });
+  it.each([
+    { mode: 'search', status: 'Former' },
+    {
+      mode: 'inquiries',
+      acceptingEvidence: true,
+      status: 'Open',
+      openedFrom: '2026-01-01',
+      openedTo: '2026-10-01',
+      sortOrder: 'DateOpenedNewest',
+    },
+    {
+      mode: 'publications',
+      committeeId: '11',
+      publicationTypeIds: ['1', '2'],
+      publishedFrom: '2026-01-01',
+      publishedTo: '2026-10-01',
+      sortOrder: 'ResponseDateDescending',
+    },
+  ] as const)(
+    'binds every new selection %j to collection continuation and retains source paging',
+    async (input) => {
+      const requests = installCommittees((url) =>
+        page(
+          Number(url.searchParams.get('Skip')) === 0 ? [{ id: 31 }] : [],
+          Number(url.searchParams.get('Skip')) === 0 ? 2 : 1,
+        ),
+      );
+      const first = await runToolContract(ukparlGetCommittee, { ...input, limit: 1 });
+      expect(first.isError).not.toBe(true);
+      const cursor = ukparlGetCommittee.output.parse(first.structuredContent).page!.nextCursor!;
+      for (const [key, value] of Object.entries(input)) {
+        if (key === 'mode' || key === 'committeeId') continue;
+        const changed =
+          key === 'sortOrder'
+            ? 'PublicationDateAscending'
+            : typeof value === 'boolean'
+              ? !value
+              : Array.isArray(value)
+                ? ['3']
+                : key === 'status'
+                  ? value === 'Open'
+                    ? 'Closed'
+                    : 'Current'
+                  : key.endsWith('From')
+                    ? '2026-02-01'
+                    : '2026-09-01';
+        const invalid = await runToolContract(ukparlGetCommittee, {
+          ...input,
+          [key]: changed,
+          limit: 1,
+          cursor,
+        });
+        expect(invalid.structuredContent).toMatchObject({
+          error: { data: { reason: 'invalid_cursor' } },
+        });
+        expect(text(invalid)).toContain('invalid_cursor');
+      }
+      expect(requests).toHaveLength(1);
+      const past = await runToolContract(ukparlGetCommittee, { ...input, limit: 1, cursor });
+      expect(past.structuredContent).toMatchObject({
+        items: [],
+        page: { returned: 0, total: 1, hasMore: false },
+        sourcePage: { itemsState: 'present' },
+      });
+      expect(requests.at(-1)!.searchParams.get('Skip')).toBe('1');
+      assertRendered(ukparlGetCommittee.output.parse(past.structuredContent), text(past));
+    },
+  );
+  it.each([
+    { mode: 'search', status: 'Former' },
+    {
+      mode: 'inquiries',
+      acceptingEvidence: true,
+      status: 'Open',
+      openedFrom: '2026-01-01',
+      openedTo: '2026-10-01',
+      sortOrder: 'DateOpenedNewest',
+    },
+    {
+      mode: 'publications',
+      committeeId: '11',
+      publicationTypeIds: ['1', '2'],
+      publishedFrom: '2026-01-01',
+      publishedTo: '2026-10-01',
+      sortOrder: 'ResponseDateDescending',
+    },
+  ] as const)('binds every new selection %j to recursive content continuation', async (input) => {
+    const field =
+      input.mode === 'search' ? 'name' : input.mode === 'inquiries' ? 'title' : 'description';
+    installCommittees(() => page([{ id: 31, [field]: '<p>Preserved Ω</p> '.repeat(2000) }]));
+    const first = await runToolContract(ukparlGetCommittee, { ...input, limit: 1 });
+    expect(first.isError).not.toBe(true);
+    const output = ukparlGetCommittee.output.parse(first.structuredContent);
+    expect(output.delivery).toBe('outline');
+    const contentCursor = output.contentPage!.entries![0]!.contentCursor;
+    for (const [key, value] of Object.entries(input)) {
+      if (key === 'mode' || key === 'committeeId') continue;
+      const changed =
+        key === 'sortOrder'
+          ? 'PublicationDateAscending'
+          : typeof value === 'boolean'
+            ? !value
+            : Array.isArray(value)
+              ? ['3']
+              : key === 'status'
+                ? value === 'Open'
+                  ? 'Closed'
+                  : 'Current'
+                : key.endsWith('From')
+                  ? '2026-02-01'
+                  : '2026-09-01';
+      const invalid = await runToolContract(ukparlGetCommittee, {
+        ...input,
+        [key]: changed,
+        limit: 1,
+        contentCursor,
+      });
+      expect(invalid.structuredContent).toMatchObject({
+        error: {
+          data: {
+            reason: 'invalid_cursor',
+            recovery: { hint: expect.stringContaining('same filters') },
+          },
+        },
+      });
+      expect(text(invalid)).toContain('invalid_cursor');
+    }
+  });
+  it.each(['written', 'oral'] as const)(
+    'preserves null %s evidence collections and rejects operational/schema failures',
+    async (evidenceType) => {
+      const requests = installCommittees((url) =>
+        url.pathname.endsWith('/91')
+          ? Response.json({ id: 'invalid' })
+          : url.pathname.endsWith('/92')
+            ? new Response('unavailable', { status: 403 })
+            : url.searchParams.get('CommitteeBusinessId') === '32'
+              ? new Response('missing endpoint', { status: 404 })
+              : page(null),
+      );
+      const empty = await runToolContract(ukparlGetCommittee, {
+        mode: 'evidence',
+        evidenceType,
+        businessId: '31',
+      });
+      expect(empty.isError).not.toBe(true);
+      expect(empty.structuredContent).toMatchObject({
+        items: [],
+        sourcePage: { itemsState: 'null' },
+        page: { total: 0, returned: 0 },
+      });
+      assertRendered(ukparlGetCommittee.output.parse(empty.structuredContent), text(empty));
+      const schemaFailure = await runToolContract(ukparlGetCommittee, {
+        mode: 'evidence_detail',
+        evidenceType,
+        evidenceId: '91',
+      });
+      expect(schemaFailure.isError).toBe(true);
+      expect(schemaFailure.structuredContent).not.toHaveProperty('found');
+      const forbidden = await runToolContract(ukparlGetCommittee, {
+        mode: 'evidence_detail',
+        evidenceType,
+        evidenceId: '92',
+      });
+      expect(forbidden.structuredContent).toMatchObject({
+        error: {
+          data: {
+            reason: 'http_forbidden',
+            recovery: { hint: expect.stringContaining('ukparl_get_committee') },
+          },
+        },
+      });
+      expect(text(forbidden)).toContain('http_forbidden');
+      const missingEndpoint = await runToolContract(ukparlGetCommittee, {
+        mode: 'evidence',
+        evidenceType,
+        businessId: '32',
+      });
+      expect(missingEndpoint.isError).toBe(true);
+      expect(missingEndpoint.structuredContent).not.toHaveProperty('found');
+      expect(requests).toHaveLength(4);
+    },
+  );
+  it.each(['written', 'oral'] as const)(
+    'retrieves complete %s evidence list/detail through both surfaces',
+    async (evidenceType) => {
+      const raw = evidence(evidenceType);
+      const route = evidenceType === 'written' ? 'WrittenEvidence' : 'OralEvidence';
+      const requests = installCommittees((url) =>
+        url.pathname.endsWith('/91') ? raw : page([raw]),
+      );
+      for (const input of [
+        { mode: 'evidence', evidenceType, businessId: '31' },
+        { mode: 'evidence_detail', evidenceType, evidenceId: '91' },
+      ] as const) {
+        const result = await runToolContract(ukparlGetCommittee, input);
+        expect(result.isError).not.toBe(true);
+        const output = ukparlGetCommittee.output.parse({
+          ...((await retrieve(input, result)) as object),
+          delivery: 'full',
+        });
+        const record = output.record ?? output.items![0]!;
+        expect(record.recordType).toBe(`${evidenceType}_evidence`);
+        expect(reconstruct(record)).toStrictEqual(raw);
+      }
+      expect(requests.every((url) => url.pathname.startsWith(`/api/${route}`))).toBe(true);
+      expect([...requests[0]!.searchParams]).toEqual([
+        ['CommitteeBusinessId', '31'],
+        ['ShowOnWebsiteOnly', 'true'],
+        ['Skip', '0'],
+        ['Take', '20'],
+      ]);
+      expect([...requests.at(-1)!.searchParams]).toEqual([['showOnWebsiteOnly', 'true']]);
+    },
+  );
+  it.each(['written', 'oral'] as const)(
+    'preserves sparse/null %s evidence and namespace-specific misses',
+    async (evidenceType) => {
+      const raw = { id: 91, witnesses: null, document: null, committees: [] };
+      const requests = installCommittees((url) =>
+        url.pathname.endsWith('/999') ? new Response('missing', { status: 404 }) : raw,
+      );
+      const result = await runToolContract(ukparlGetCommittee, {
+        mode: 'evidence_detail',
+        evidenceType,
+        evidenceId: '91',
+      });
+      expect(result.isError).not.toBe(true);
+      const output = ukparlGetCommittee.output.parse(result.structuredContent);
+      expect(reconstruct(output.record!)).toStrictEqual(raw);
+      assertRendered(output, text(result));
+      const missing = await runToolContract(ukparlGetCommittee, {
+        mode: 'evidence_detail',
+        evidenceType,
+        evidenceId: '999',
+      });
+      expect(missing.isError).not.toBe(true);
+      expect(missing.structuredContent).toMatchObject({ found: false });
+      expect(text(missing)).toContain('evidence mode');
+      expect(requests).toHaveLength(2);
+    },
+  );
+  it('binds evidence collection/content cursors to type and IDs and reconstructs nested oversized content', async () => {
+    const raw = {
+      ...evidence('written'),
+      anonymousWitnessText: 'Source HTML <p>Ω</p> '.repeat(4000),
+    };
+    const requests = installCommittees((url) =>
+      page(Number(url.searchParams.get('Skip')) === 0 ? [raw] : [], 1),
+    );
+    const input = {
+      mode: 'evidence',
+      evidenceType: 'written',
+      businessId: '31',
+      limit: 1,
+    } as const;
+    const first = await runToolContract(ukparlGetCommittee, input);
+    const output = ukparlGetCommittee.output.parse({
+      ...((await retrieve(input, first)) as object),
+      delivery: 'full',
+    });
+    expect(reconstruct(output.items![0]!)).toStrictEqual(raw);
+    const contentCursor = ukparlGetCommittee.output.parse(first.structuredContent).contentPage!
+      .entries![0]!.contentCursor;
+    const before = requests.length;
+    for (const change of [{ evidenceType: 'oral' }, { businessId: '32' }, { limit: 2 }]) {
+      const result = await runToolContract(ukparlGetCommittee, {
+        ...input,
+        ...change,
+        contentCursor,
+      });
+      expect(result.structuredContent).toMatchObject({
+        error: { data: { reason: 'invalid_cursor' } },
+      });
+      expect(text(result)).toContain('invalid_cursor');
+    }
+    // Content continuations re-read the selected source before delivery validates their binding.
+    expect(requests).toHaveLength(before + 3);
+  });
+  it.each(['written', 'oral'] as const)(
+    'handles %s evidence cap, empty and past-end pages without losing source metadata',
+    async (evidenceType) => {
+      let empty = false;
+      const requests = installCommittees((url) =>
+        page(
+          empty || Number(url.searchParams.get('Skip')) > 0 ? [] : [{ id: 91 }],
+          empty ? 0 : Number(url.searchParams.get('Skip')) > 0 ? 1 : 2,
+        ),
+      );
+      const input = { mode: 'evidence', evidenceType, businessId: '31', limit: 1 } as const;
+      const first = await runToolContract(ukparlGetCommittee, input);
+      const cursor = ukparlGetCommittee.output.parse(first.structuredContent).page!.nextCursor!;
+      const past = await runToolContract(ukparlGetCommittee, { ...input, cursor });
+      expect(past.structuredContent).toMatchObject({
+        items: [],
+        page: { returned: 0, total: 1, hasMore: false },
+        sourcePage: { itemsState: 'present' },
+      });
+      assertRendered(ukparlGetCommittee.output.parse(past.structuredContent), text(past));
+      const before = requests.length;
+      const rebound = await runToolContract(ukparlGetCommittee, {
+        ...input,
+        evidenceType: evidenceType === 'oral' ? 'written' : 'oral',
+        cursor,
+      });
+      expect(rebound.structuredContent).toMatchObject({
+        error: { data: { reason: 'invalid_cursor' } },
+      });
+      expect(requests).toHaveLength(before);
+      empty = true;
+      const capped = await runToolContract(ukparlGetCommittee, { ...input, limit: 100 });
+      expect(capped.structuredContent).toMatchObject({
+        requestedLimit: 100,
+        cap: 50,
+        items: [],
+        page: { total: 0, returned: 0 },
+      });
+      expect(text(capped)).toContain('capped at 50');
+      expect(requests.at(-1)!.searchParams.get('Take')).toBe('50');
+    },
+  );
+  it('characterizes sparse publication null and omitted document metadata on both surfaces', async () => {
+    const raw = {
+      id: 51,
+      documents: [{ documentId: 61, files: [{ url: null }] }],
+      businesses: null,
+    };
+    installCommittees(() => raw);
+    const result = await runToolContract(ukparlGetCommittee, {
+      mode: 'publication',
+      publicationId: '51',
+    });
+    const output = ukparlGetCommittee.output.parse(result.structuredContent);
+    expect(reconstruct(output.record!)).toStrictEqual(raw);
+    assertRendered(output, text(result));
+  });
   it.each([
     ['detail', { committeeId: '0011' }, '/api/Committees/11', committeeDetail()],
     ['inquiry', { businessId: '0031' }, '/api/CommitteeBusiness/31', businessDetail()],
@@ -227,6 +930,15 @@ describe('ukparl_get_committee', () => {
   });
 
   it.each([
+    { mode: 'evidence', businessId: '31' },
+    { mode: 'evidence', evidenceType: 'written' },
+    { mode: 'evidence', evidenceType: 'written', businessId: '31', committeeId: '11' },
+    { mode: 'evidence', evidenceType: 'oral', businessId: '31', evidenceId: '91' },
+    { mode: 'evidence_detail', evidenceId: '91' },
+    { mode: 'evidence_detail', evidenceType: 'written' },
+    { mode: 'evidence_detail', evidenceType: 'oral', evidenceId: '91', businessId: '31' },
+    { mode: 'evidence_detail', evidenceType: 'oral', evidenceId: '91', limit: 1 },
+    { mode: 'search', evidenceType: 'written' },
     { mode: 'detail' },
     { mode: 'members' },
     { mode: 'inquiry', committeeId: '11' },

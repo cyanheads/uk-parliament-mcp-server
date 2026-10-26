@@ -127,6 +127,13 @@ describe('BillsService authoritative queries', () => {
 });
 
 describe('BillsService selected complete records', () => {
+  it('keeps an explicitly unenacted overview metadata-only', async () => {
+    const requests = installBills(() => bill());
+    using call = getParliamentHttp().beginCall(createMockContext());
+    const result = await getBillsService().get({ billId: '11', section: 'overview' }, call);
+    expect(result.payload.legislationHandoff).toEqual({ status: 'not_enacted', links: [] });
+    expect(requests.map((url) => url.pathname)).toEqual(['/api/v1/Bills/11']);
+  });
   it('pages publications locally, preserves all links/files and finds only supplied statute URLs', async () => {
     const requests = installBills((url) =>
       url.pathname.endsWith('/Publications')

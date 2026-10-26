@@ -7,6 +7,7 @@ import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import {
   advanceCollectionCursor,
   invalidCursor,
+  pageFor,
   readCollectionCursor,
 } from '../parliament-http/parliament-cursors.js';
 import {
@@ -18,8 +19,10 @@ import {
 import type { House, Page, Source } from '../parliament-http/parliament-models.js';
 import {
   CommonsDivisionSchema,
+  CommonsMemberVoteSchema,
   type Division,
   LordsDivisionSchema,
+  LordsMemberVoteSchema,
   type Voter,
 } from './divisions-schemas.js';
 
@@ -274,7 +277,6 @@ export class DivisionsService {
       nativePageSize: input.limit,
     };
     const cursor = readCollectionCursor(input.cursor, binding);
-    if (cursor.offset > 2147483647) return invalidCursor();
     if (input.mode === 'search') {
       let records: Division[];
       let source: Source;
@@ -291,13 +293,33 @@ export class DivisionsService {
         const response = await this.http.get(
           call,
           api,
-          '/data/divisions.json/search',
-          z.array(CommonsDivisionSchema),
+          input.memberId ? '/data/divisions.json/membervoting' : '/data/divisions.json/search',
+          input.memberId
+            ? z
+                .array(
+                  CommonsMemberVoteSchema.refine((row) => String(row.MemberId) === input.memberId),
+                )
+                .transform((rows) =>
+                  rows.map((row) => ({
+                    raw: row.PublishedDivision,
+                    memberVote: {
+                      memberId: String(row.MemberId),
+                      lobby: row.MemberVotedAye ? ('aye' as const) : ('no' as const),
+                      wasTeller: row.MemberWasTeller,
+                    },
+                  })),
+                )
+            : z
+                .array(CommonsDivisionSchema)
+                .transform((rows) => rows.map((raw) => ({ raw, memberVote: undefined }))),
           query,
           Object.keys(query),
         );
         source = response.source;
-        records = response.data.map((raw) => normalizeCommons(raw, source, false).record);
+        records = response.data.map(({ raw, memberVote }) => ({
+          ...normalizeCommons(raw, source, false).record,
+          ...(memberVote ? { memberVote } : {}),
+        }));
       } else {
         const query: ParliamentQuery = {
           SearchTerm: input.query,
@@ -311,13 +333,33 @@ export class DivisionsService {
         const response = await this.http.get(
           call,
           api,
-          '/data/Divisions/search',
-          z.array(LordsDivisionSchema),
+          input.memberId ? '/data/Divisions/membervoting' : '/data/Divisions/search',
+          input.memberId
+            ? z
+                .array(
+                  LordsMemberVoteSchema.refine((row) => String(row.memberId) === input.memberId),
+                )
+                .transform((rows) =>
+                  rows.map((row) => ({
+                    raw: row.publishedDivision,
+                    memberVote: {
+                      memberId: String(row.memberId),
+                      lobby: row.memberWasContent ? ('content' as const) : ('not_content' as const),
+                      wasTeller: row.memberWasTeller,
+                    },
+                  })),
+                )
+            : z
+                .array(LordsDivisionSchema)
+                .transform((rows) => rows.map((raw) => ({ raw, memberVote: undefined }))),
           query,
           Object.keys(query),
         );
         source = response.source;
-        records = response.data.map((raw) => normalizeLords(raw, source, false).record);
+        records = response.data.map(({ raw, memberVote }) => ({
+          ...normalizeLords(raw, source, false).record,
+          ...(memberVote ? { memberVote } : {}),
+        }));
       }
       const repage = (count: number): DivisionPayload => ({
         ...base,
@@ -398,14 +440,7 @@ export class DivisionsService {
     const repage = (shown: number): DivisionPayload => ({
       ...full,
       voters: voters.slice(cursor.offset, cursor.offset + shown),
-      page: {
-        returned: shown,
-        total: voters.length,
-        hasMore: cursor.offset + shown < voters.length,
-        ...(cursor.offset + shown < voters.length
-          ? { nextCursor: advanceCollectionCursor(cursor, shown) }
-          : {}),
-      },
+      page: pageFor(cursor, shown, voters.length),
     });
     return { payload: repage(count), count, repage };
   }

@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import {
   ContentCursorSchema,
   decodeCursor,
+  digest,
   encodeCursor,
 } from '@/services/parliament-http/parliament-cursors.js';
 import {
@@ -24,19 +25,20 @@ function assertSurfaces(value: object): void {
   const content = formatData(value);
   content.push(...formatData(enrichment));
   expect(
-    Buffer.byteLength(JSON.stringify({ structuredContent: { ...value, ...enrichment }, content })),
+    Buffer.byteLength(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: Number.MAX_SAFE_INTEGER,
+        result: { structuredContent: { ...value, ...enrichment }, content },
+      }),
+    ),
   ).toBeLessThanOrEqual(24_000);
   const text = content.map((block) => block.text).join('\n');
-  // Every scalar is JSON fenced; decode each fence independently of the renderer.
+  // Decode the complete JSON blocks independently of the renderer.
   const encoded = [...text.matchAll(/(`{3,})json\n([^\n]*)\n\1/g)].map((match) =>
     JSON.parse(match[2] ?? 'null'),
   );
-  function visit(node: unknown): void {
-    if (node !== null && typeof node === 'object')
-      for (const child of Object.values(node)) visit(child);
-    else expect(encoded).toContainEqual(node);
-  }
-  visit(value);
+  expect(encoded).toContainEqual(JSON.parse(JSON.stringify(value)));
 }
 
 function reconstruct(
@@ -84,7 +86,10 @@ function reconstruct(
         .replaceAll('~1', '/')
         .replaceAll('~0', '~');
       Object.defineProperty(output, key, {
-        value: reconstruct(payload, entry.contentCursor, deliveryOptions),
+        value:
+          entry.jsonValue === undefined
+            ? reconstruct(payload, entry.contentCursor, deliveryOptions)
+            : JSON.parse(entry.jsonValue),
         enumerable: true,
         configurable: true,
         writable: true,
@@ -102,6 +107,112 @@ function reconstruct(
 }
 
 describe('lossless content delivery', () => {
+  it('preserves a pre-existing content cursor for a smaller whole-record prefix', () => {
+    const items = [
+      { id: 'first', text: 'x'.repeat(1000) },
+      { id: 'second', text: 'y'.repeat(1000) },
+    ];
+    const payload = { items };
+    const contentCursor = encodeCursor({
+      v: 1,
+      binding: digest({ tool: options.tool, selection }),
+      revision: digest({ items: items.slice(0, 1) }, true),
+      path: '/items',
+      arm: 'entries',
+      offset: 0,
+    });
+    expect(
+      reconstruct(payload, contentCursor, {
+        ...options,
+        collection: { count: 2, repage: (count) => ({ items: items.slice(0, count) }) },
+      }),
+    ).toEqual([items[0]]);
+  });
+  it('renders a complete record in one reversible JSON block with clickable source links', () => {
+    const payload = {
+      rows: [{ id: '42', html: '<p>Text</p>', nullable: null, url: 'https://example.test/source' }],
+    };
+    const rendered = formatData(payload)[0]!.text;
+    expect(rendered).toContain(`\`\`\`json\n${JSON.stringify(payload)}\n\`\`\``);
+    expect(rendered).not.toContain('/rows/0/html');
+    expect(rendered).toContain('[Open source link](<https://example.test/source>)');
+  });
+  it('inlines fitting child JSON without removing its equivalent continuation', () => {
+    const payload = { text: 'a'.repeat(30000), small: { rows: [null, false, {}, []] } };
+    const result = deliverPayload(payload, options) as ContentDelivery;
+    const entry = result.contentPage.entries!.find((row) => row.path === '/small')!;
+    expect(entry).toHaveProperty('jsonValue', JSON.stringify(payload.small));
+    expect(reconstruct(payload, entry.contentCursor)).toEqual(payload.small);
+  });
+  it('uses the remaining response budget for Unicode scalar fragments', () => {
+    const payload = { text: '🦊'.repeat(30000) };
+    const outline = deliverPayload(payload, options) as ContentDelivery;
+    const fragment = deliverPayload(payload, {
+      ...options,
+      contentCursor: outline.contentPage.entries![0]!.contentCursor,
+    }) as ContentDelivery;
+    expect(fragment.contentPage.fragment!.length).toBeGreaterThan(2000);
+    assertSurfaces(fragment);
+    expect(reconstruct(payload)).toEqual(payload);
+  });
+  it('keeps inline JSON and cursor retrieval equivalent through nested descriptor pages', () => {
+    const rows = Array.from({ length: 27 }, (_, id) => ({
+      id,
+      'a/b~c': {
+        html: `<p>${'文'.repeat(900)}</p>`,
+        nullable: null,
+        empty: [],
+        source: 'https://example.test/source',
+      },
+    }));
+    const payload = { rows };
+    const root = deliverPayload(payload, options) as ContentDelivery;
+    const rowsCursor = root.contentPage.entries!.find(
+      (entry) => entry.path === '/rows',
+    )!.contentCursor;
+    let page = (
+      deliverPayload(payload, { ...options, contentCursor: rowsCursor }) as ContentDelivery
+    ).contentPage;
+    const restored: unknown[] = [];
+    let inlineCount = 0;
+    let pages = 0;
+    for (;;) {
+      pages++;
+      for (const entry of page.entries!) {
+        const fetched = reconstruct(payload, entry.contentCursor);
+        if (entry.jsonValue !== undefined) {
+          const inline = JSON.parse(entry.jsonValue);
+          expect(inline).toEqual(fetched);
+          inlineCount++;
+        }
+        restored.push(fetched);
+      }
+      if (!page.hasMore) break;
+      page = (
+        deliverPayload(payload, { ...options, contentCursor: page.nextCursor }) as ContentDelivery
+      ).contentPage;
+    }
+    expect(restored).toEqual(rows);
+    expect(inlineCount).toBeGreaterThan(0);
+    expect(pages).toBeGreaterThan(1);
+    expect(reconstruct(payload)).toEqual(payload);
+  });
+  it('preserves literal HTML, null, false, empty collections and source links', () => {
+    const payload = {
+      html: '<p>source &amp; text</p>',
+      nullable: null,
+      flag: false,
+      rows: [],
+      metadata: {},
+      url: 'https://example.test/source',
+    };
+    const result = deliverPayload(payload, options);
+    expect(result).toEqual({ ...payload, delivery: 'full' });
+    assertSurfaces(result);
+    expect(formatData(result)[0]!.text).toContain(
+      '[Open source link](<https://example.test/source>)',
+    );
+  });
   it.each([
     ['many short runs', '`a'.repeat(150000), '```'],
     ['one long run', '`'.repeat(100), '`'.repeat(101)],
@@ -111,7 +222,10 @@ describe('lossless content delivery', () => {
     (_name, value, fence) => {
       expect(process.release.name).toBe('node');
       expect(formatData({ nameContains: value })).toEqual([
-        { type: 'text', text: `/nameContains\n${fence}json\n${JSON.stringify(value)}\n${fence}` },
+        {
+          type: 'text',
+          text: `value\n${fence}json\n${JSON.stringify({ nameContains: value })}\n${fence}`,
+        },
       ]);
     },
   );
@@ -145,6 +259,7 @@ describe('lossless content delivery', () => {
     const fragment = deliverPayload(payload, { ...retainedOptions, contentCursor: cursor });
     expect(fragment.delivery).toBe('fragment');
     for (const result of [outline, fragment]) {
+      if (result.delivery === 'full') throw new Error('Expected content continuation.');
       expect(result).toMatchObject({
         provenance: {
           api: 'members',
@@ -165,7 +280,11 @@ describe('lossless content delivery', () => {
         'next-whole-item',
       ])
         expect(rendered).toContain(value);
-      expect(rendered).not.toContain('Complete source notice.');
+      expect(result.provenance).not.toHaveProperty('notices');
+      if (result.delivery === 'outline') {
+        const sourceEntry = result.contentPage.entries!.find((entry) => entry.path === '/source')!;
+        expect(JSON.parse(sourceEntry.jsonValue!)).toEqual(source);
+      } else expect(rendered).not.toContain('Complete source notice.');
     }
     expect(reconstruct(payload, undefined, retainedOptions)).toEqual(payload);
   });
@@ -276,7 +395,7 @@ describe('lossless content delivery', () => {
       page: { returned: 0, hasMore: false, total: 0 },
     });
     assertSurfaces(result);
-    expect(formatData(result)[0]?.text).toContain('/items\n[]');
+    expect(formatData(result)[0]?.text).toContain('"items":[]');
     expect(formatData(result)[0]?.text).not.toContain('nextCursor');
   });
 

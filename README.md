@@ -1,13 +1,13 @@
 <div align="center">
   <h1>@cyanheads/uk-parliament-mcp-server</h1>
   <p><b>Search UK Parliament bills, members, votes, Hansard, written questions, and committees via MCP. STDIO or Streamable HTTP.</b>
-  <div>9 Tools • 0 Resources • 0 Prompts</div>
+  <div>9 Tools</div>
   </p>
 </div>
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/uk-parliament-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/uk-parliament-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/uk-parliament-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.1.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/uk-parliament-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.4.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/uk-parliament-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/uk-parliament-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -19,25 +19,31 @@
 
 </div>
 
+<div align="center">
+
+**Public Hosted Server:** [https://uk-parliament.caseyjhand.com/mcp](https://uk-parliament.caseyjhand.com/mcp)
+
+</div>
+
 ---
 
 ## Overview
 
-Westminster records from the official UK Parliament Bills, Members, Commons and Lords Votes, Hansard, Written Questions, and Committees APIs. Search parliamentary business, retrieve selected records and source links, and trace members, bills, votes, answers, and committee evidence across their distinct identifiers. Runs as a stdio process or a local Streamable HTTP server; no API key is required.
+Westminster records from the official UK Parliament Bills, Members, Commons and Lords Votes, Hansard, Written Questions, and Committees APIs. Search parliamentary business, retrieve selected records and source links, and trace members, bills, votes, answers, and committee publications across their distinct identifiers. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above; no API key is required.
 
 ### Tools
 
 | Tool | Description |
 |:---|:---|
 | `ukparl_lookup_reference` | Resolve filter IDs, identifier namespaces, and historical coverage guidance |
-| `ukparl_search_bills` | Search bill summaries by title, House, session, sponsor, stage, and bill type |
+| `ukparl_search_bills` | Search and order bill summaries by title, House, session, sponsor, department, stage, type, and status |
 | `ukparl_get_bill` | Retrieve bill details, stages, publications, amendments, and ping-pong motions |
 | `ukparl_search_members` | Find current and former MPs and peers, including dated membership searches |
 | `ukparl_get_member` | Retrieve profiles, roles, committee seats, official contacts, interests, and voting history |
-| `ukparl_search_divisions` | Search House-scoped divisions and inspect metadata, voters, and party totals |
+| `ukparl_search_divisions` | Search House-scoped divisions and member votes; inspect metadata, voters, and party totals |
 | `ukparl_search_hansard` | Search spoken contributions with complete source text where supplied |
 | `ukparl_search_questions` | Search question and answer previews or retrieve complete question details |
-| `ukparl_get_committee` | Discover committees and retrieve memberships, business, and publication metadata |
+| `ukparl_get_committee` | Discover committees and business; retrieve memberships, publications, and written/oral evidence metadata |
 
 ## Capability reference
 
@@ -46,12 +52,14 @@ Westminster records from the official UK Parliament Bills, Members, Commons and 
 - `topic`: `identifiers`, `coverage`, `bill_stages`, `bill_types`, `parties`, `departments`, or `answering_bodies`; live directories default to 10 rows, capped at 20, with optional `nameContains` AND-token filtering
 - `house` is required only for `parties`; that directory covers active parties in the selected House, not every historical party. Static guides accept neither House nor name filters
 - Identifier guidance distinguishes reference `stageId` from bill-specific `billStageId`, House-scoped division IDs, Questions API IDs from UINs, and committee person IDs from Members API IDs
+- `departments` IDs feed `ukparl_search_bills.departmentId`; they are distinct from Written Questions answering-body IDs
 
 ---
 
 ### `ukparl_search_bills` <sub>tool</sub>
 
-- Optional `query`, `house`, `sessionId`, `memberId`, `stageIds`, and `billTypeIds`; each ID array accepts up to 20 entries. Defaults to 10 bills, capped at 20
+- Optional `query`, current `house`, `originatingHouse`, `sessionId`, `memberId`, `departmentId`, `stageIds`, and `billTypeIds`; each ID array accepts up to 20 entries. Defaults to 10 bills, capped at 20
+- `sortOrder`: `TitleAscending`, `TitleDescending`, `DateUpdatedAscending`, or `DateUpdatedDescending`; omission preserves source ordering. Optional `isDefeated` and `isWithdrawn` accept true or false. `inAmendableStage: true` restricts to amendable stages; false leaves results unrestricted
 - Results are `detailLevel: "summary"` with `billId`, provenance, and collection continuation; no current-session scope is inferred. Resolve reference filters with `ukparl_lookup_reference`
 
 ---
@@ -60,14 +68,16 @@ Westminster records from the official UK Parliament Bills, Members, Commons and 
 
 - Required `billId`; `section` defaults to `overview`, or selects `stages`, `stage`, `publications`, `amendments`, `amendment`, `motions`, or `motion`. Collections default to 20 records, capped at 50
 - Stage, amendment, and motion selections require the bill-specific `billStageId` from `stages`; singular amendment/motion retrieval also needs `itemId` from the parent collection (`amendmentId` for amendments, `motion.id` for motions). Amendment/motion lists are summaries; singular selectors retrieve complete text
-- Missing entities return `found: false` with `guidance`. `legislationHandoff.status` is `authoritative_link`, `not_enacted`, or `unavailable`; only actual supplied legislation.gov.uk links establish a statute handoff
+- Only `section: "amendments"` accepts `amendmentNumber` (a string retaining letter suffixes), official `decision`, and sponsoring `memberId` filters. Filters apply before source pagination; singular retrieval still uses `itemId`
+- Missing entities return `found: false` with `guidance`. `section: "publications"` derives `legislationHandoff` (`authoritative_link`, `not_enacted`, or `unavailable`) from the bill's published documents; only supplied legislation.gov.uk links establish a statute handoff
+- Overview reads metadata only. Unless `isAct` is explicitly false, its `unavailable` handoff explains that publications remain unchecked; repeat with the same `billId` and `section: "publications"` to discover statute links
 
 ---
 
 ### `ukparl_search_members` <sub>tool</sub>
 
-- Optional `name`, `constituency` (source location text), `partyId`, and `house`; `currentOnly` defaults to `false`, including current and former members. Defaults to 10 rows, capped at 20
-- `asOf` selects membership on a real `YYYY-MM-DD` date and accepts only `name` and pagination alongside it; returned latest profile fields are not a historical snapshot
+- Optional `name`, `constituency` (source location text: constituency name or postcode), `partyId`, and `house`; `currentOnly` defaults to `false`, including current and former members. Defaults to 10 rows, capped at 20
+- `asOf` selects membership on a real `YYYY-MM-DD` date and accepts `name`, pagination, and `currentOnly: false` alongside it; returned latest profile fields are not a historical snapshot
 - Summary hits carry `memberId` for `ukparl_get_member`, `source`, and `page`; unknown source fields remain absent or null
 
 ---
@@ -85,6 +95,7 @@ Westminster records from the official UK Parliament Bills, Members, Commons and 
 - Required `house`: `commons` or `lords`; `mode`: `search` (default), `detail`, `voters`, or `party_totals`. Search accepts `query`, `memberId`, and inclusive `startDate` / `endDate`; defaults to 5 divisions, capped at 10
 - Other modes require a `divisionId` from the same House. Voters default to 20 rows, capped at 50, with exact source `party` labels and `lobby`: Commons `aye`, `no`, `not_recorded`; Lords `content`, `not_content`
 - Detail preserves headline counts and teller identities; `partyTotals` counts listed non-tellers and tellers separately. `not_recorded` is the source list, never an abstention claim; member searches include teller participation
+- Search with `memberId` returns `memberVote: { memberId, lobby, wasTeller }` on each result, using the House's recorded lobby. A missing result does not imply abstention
 
 ---
 
@@ -98,17 +109,20 @@ Westminster records from the official UK Parliament Bills, Members, Commons and 
 
 ### `ukparl_search_questions` <sub>tool</sub>
 
-- `mode: "search"` (default) accepts `query`, `memberId`, `house`, up to 20 `answeringBodyIds`, `answered`, and inclusive `tabledFrom` / `tabledTo` / `answeredFrom` / `answeredTo` dates (`YYYY-MM-DD`). Defaults to 10 previews, capped at 20
+- `mode: "search"` (default) accepts `query`, `uin`, asking-member `memberId`, `answeringMemberId`, `house`, up to 20 `answeringBodyIds`, `answered`, and inclusive `tabledFrom` / `tabledTo` / `answeredFrom` / `answeredTo` dates (`YYYY-MM-DD`). Defaults to 10 previews, capped at 20
 - Search includes all sessions and withdrawn questions; omitted `answered` includes either state. `mode: "detail"` takes a returned `questionId` alone for complete question/answer HTML, corrections, and attachment metadata; a UIN is not a `questionId`
+- `uin` retains leading zeros and normalizes the `HL` prefix. Without dates, reused UINs can return candidates across sessions; combine `tabledFrom` / `tabledTo` and House filters to narrow them, then retrieve a returned `questionId`
 - Results distinguish `detailLevel: "summary"` from `"complete"`; detail misses return `found: false` with `guidance`. Attachments are links and metadata, not downloaded files
 
 ---
 
 ### `ukparl_get_committee` <sub>tool</sub>
 
-- `mode: "search"` (default) accepts `query` and `house` (`commons`, `lords`, `joint`), default 10/cap 20. `detail`, `members`, `inquiries`, and `publications` require `committeeId`; nested collections default to 20/cap 50
+- `mode: "search"` (default) accepts `query`, `house` (`commons`, `lords`, `joint`), and `status: Current|Former|All`, default 10/cap 20. `detail`, `members`, and `publications` require `committeeId`; `inquiries` accepts it optionally for committee-specific or cross-committee discovery. Nested collections default to 20/cap 50
 - `inquiry` requires `businessId`; `publication` requires `publicationId`. `businessId` can also filter publications. `membership` selects `all` (default), `current`, or `former` in members mode; `query` in inquiries/publications requires at least two characters
-- `inquiries` includes all committee business types, labelled by `isInquiry`. Records retain typed entities and `sourcePath` relationships; publications return evidence/report metadata and document links, without downloads or text extraction
+- `inquiries` accepts `status: Open|Closed`, `acceptingEvidence`, inclusive `openedFrom` / `openedTo` dates, and `sortOrder: DateOpenedNewest|DateOpenedOldest|PublicationDateAscending|PublicationDateDescending`. `acceptingEvidence: true` restricts to accepting businesses; false is unrestricted. All business types remain labelled by `isInquiry`
+- `publications` accepts repeated `publicationTypeIds`, inclusive `publishedFrom` / `publishedTo` dates, and `sortOrder: PublicationDateAscending|PublicationDateDescending|ResponseDateAscending|ResponseDateDescending`. Omitted filters preserve source defaults
+- `evidence` requires `businessId` and `evidenceType: written|oral`; `evidence_detail` requires `evidenceId` and the same `evidenceType`. These IDs occupy separate written/oral namespaces. Records retain typed entities and `sourcePath` relationships, witnesses, organisations, dates, source state, and supplied document links. Publications remain separate reports, responses, and correspondence; no mode downloads or extracts documents
 
 ## Features
 
@@ -119,99 +133,45 @@ UK Parliament-specific:
 - Keyless, read-only access to seven official Westminster API origins; devolved legislatures are outside scope
 - Separate identifier namespaces and explicit source selections, with no inferred current session or date window
 - Shared per-origin backpressure, bounded retries, and a 45-second call deadline across related requests
-- Historical coverage remains source-specific: the Hansard archive starts on 22 November 1803, the Spoken API minimum date is unknown, and no automatic historical-archive fallback is performed
+- Hansard coverage is source-specific: the archive starts on 22 November 1803, the Spoken API minimum date is unknown, and there is no automatic historical-archive fallback
 
 Agent-friendly output:
 
 - Provenance — source API, request URL, retrieval timestamp, and licence link accompany source records; `applied` reports effective selections and limits
-- Whole-record pagination — `page.returned`, `hasMore`, and `nextCursor` describe actual emitted records, with `total` only when known. Repeat the same filters and effective limit when following a cursor
-- Lossless large records — `delivery: "full" | "outline" | "fragment"` separates complete payloads from `contentPage` continuations. Repeat the original tool inputs plus each `contentCursor`, follow all outline entries and continuations, concatenate consecutive fragments before JSON-decoding once, and reconstruct the selected record before advancing `collectionPage`
+- Whole-record pagination — `page.returned`, `hasMore`, and `nextCursor` describe actually emitted records, with `total` only when known; every response stays under 24,000 bytes across both output surfaces
+- Lossless large records — `delivery: "full" | "outline" | "fragment"`; an oversized record returns `contentPage` descriptors, and repeating the original inputs plus each `contentCursor` reconstructs it exactly
+- Compact JSON — content renders complete values as reversible JSON blocks with clickable source links. An outline entry's optional `jsonValue` is complete JSON text you can decode directly; its `contentCursor` still retrieves the same value. Fragment sizes adapt to the response budget; concatenate their JSON text before decoding
 - Explicit recovery — `invalid_cursor` restarts a selection; `source_changed` restarts content retrieval after an upstream revision. Search previews, missing records, and unavailable collections remain distinct
+- Selector errors name each missing or incompatible field and its repair in deterministic order, before network requests; existing error reasons and recovery hints remain stable
 
 ## Getting started
 
-Add the following to your MCP client configuration file.
+Connect to the hosted instance, no install:
 
-```json
-{
-  "mcpServers": {
-    "uk-parliament-mcp-server": {
-      "type": "stdio",
-      "command": "bunx",
-      "args": ["@cyanheads/uk-parliament-mcp-server@latest"],
-      "env": { "MCP_TRANSPORT_TYPE": "stdio", "MCP_LOG_LEVEL": "info" }
-    }
-  }
-}
+```sh
+claude mcp add --transport http uk-parliament-mcp-server https://uk-parliament.caseyjhand.com/mcp
 ```
 
-Or with npx (no Bun required):
+Or run it locally:
+
+```sh
+claude mcp add uk-parliament-mcp-server -- npx -y @cyanheads/uk-parliament-mcp-server
+```
+
+For other clients, add this to the MCP config file:
 
 ```json
 {
   "mcpServers": {
     "uk-parliament-mcp-server": {
-      "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@cyanheads/uk-parliament-mcp-server@latest"],
-      "env": { "MCP_TRANSPORT_TYPE": "stdio", "MCP_LOG_LEVEL": "info" }
+      "args": ["-y", "@cyanheads/uk-parliament-mcp-server"]
     }
   }
 }
 ```
 
-Or with Docker:
-
-```json
-{
-  "mcpServers": {
-    "uk-parliament-mcp-server": {
-      "type": "stdio",
-      "command": "docker",
-      "args": ["run", "-i", "--rm", "-e", "MCP_TRANSPORT_TYPE=stdio", "ghcr.io/cyanheads/uk-parliament-mcp-server:latest"]
-    }
-  }
-}
-```
-
-For Streamable HTTP, set the transport and start the server:
-
-```sh
-MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
-# Server listens at http://localhost:3010/mcp
-```
-
-### Prerequisites
-
-- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
-- Internet access to the official Parliament APIs; no API key is required.
-
-### Installation
-
-1. **Clone the repository:**
-
-```sh
-git clone https://github.com/cyanheads/uk-parliament-mcp-server.git
-```
-
-2. **Navigate into the directory:**
-
-```sh
-cd uk-parliament-mcp-server
-```
-
-3. **Install dependencies:**
-
-```sh
-bun install
-```
-
-4. **Configure environment:**
-
-```sh
-cp .env.example .env
-# edit .env for transport, logging, or authentication overrides as needed
-```
+No API key is required. For Docker or a source build, see [Running the server](#running-the-server).
 
 ## Configuration
 
@@ -234,6 +194,17 @@ See [`.env.example`](./.env.example) for the common framework overrides. There a
 
 ### Local development
 
+Requires [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+) and internet access to the official Parliament APIs.
+
+- **Clone and install:**
+
+  ```sh
+  git clone https://github.com/cyanheads/uk-parliament-mcp-server.git
+  cd uk-parliament-mcp-server && bun install
+  cp .env.example .env
+  # edit .env for transport, logging, or authentication overrides as needed
+  ```
+
 - **Build and run the production version**:
 
   ```sh
@@ -252,6 +223,14 @@ See [`.env.example`](./.env.example) for the common framework overrides. There a
   bun run test      # Runs the test suite
   ```
 
+### Docker
+
+```sh
+docker run --rm -p 3010:3010 ghcr.io/cyanheads/uk-parliament-mcp-server:latest
+```
+
+The image defaults to HTTP transport, stateless sessions, and logs to `/var/log/uk-parliament-mcp-server`. For an MCP client using stdio, use `"command": "docker"` with `"args": ["run", "-i", "--rm", "-e", "MCP_TRANSPORT_TYPE=stdio", "ghcr.io/cyanheads/uk-parliament-mcp-server:latest"]`. Build locally with `docker build -t uk-parliament-mcp-server .`; `--build-arg OTEL_ENABLED=false` omits the optional OpenTelemetry peers.
+
 ## Project structure
 
 | Directory | Purpose |
@@ -263,7 +242,7 @@ See [`.env.example`](./.env.example) for the common framework overrides. There a
 | `src/services/divisions` | Commons/Lords division metadata and recorded voter collections. |
 | `src/services/hansard` | Spoken contribution search and historical coverage metadata. |
 | `src/services/questions` | Written question previews and complete question/answer records. |
-| `src/services/committees` | Committee business, membership, publication metadata, and typed relationships. |
+| `src/services/committees` | Committee business, memberships, publications, evidence metadata, and typed relationships. |
 | `tests/` | Unit and integration tests, mirroring the `src/` structure. |
 
 ## Development guide
@@ -286,6 +265,6 @@ bun run test
 
 ## License
 
-This project is licensed under the Apache 2.0 License. See the [LICENSE](./LICENSE) file for details.
+Apache-2.0 — see [LICENSE](./LICENSE) for details.
 
 Contains Parliamentary information licensed under the [Open Parliament Licence v3.0](https://www.parliament.uk/site-information/copyright-parliament/open-parliament-licence/) where applicable. Personal data, parliamentary marks, and third-party rights are excluded; preserve the source's notices and check rights before reusing excluded material. This software is independent and does not imply parliamentary endorsement.

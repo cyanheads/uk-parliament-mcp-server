@@ -22,7 +22,7 @@ const AttachmentSchema = z.object({
   fileSizeBytes: z.number().int().nonnegative().optional().describe('Published size in bytes.'),
 });
 /** Complete source question, with absence preserved rather than inferred. */
-export const QuestionSchema = z.object({
+const QuestionSchema = z.object({
   id: z.number().int().positive().describe('Questions API numeric record ID, distinct from UIN.'),
   askingMemberId: z.number().int().positive().optional().describe('Asking Members API ID.'),
   askingMember: MemberSchema.nullish().describe('Expanded asking member reference.'),
@@ -36,7 +36,9 @@ export const QuestionSchema = z.object({
   uin: z
     .string()
     .nullish()
-    .describe('UIN; requires its date for unique lookup and is not questionId.'),
+    .describe(
+      'Source UIN; search returns candidates across sessions, while questionId selects one record.',
+    ),
   questionText: z
     .string()
     .nullish()
@@ -88,7 +90,7 @@ export const QuestionSchema = z.object({
     .describe('Grouped question UIN and date relationships.'),
 });
 /** Source relationship links, preserved without interpreting relative routes as API paths. */
-export const QuestionLinkSchema = z.object({
+const QuestionLinkSchema = z.object({
   rel: z.string().nullish().describe('Source relation.'),
   href: z.string().nullish().describe('Source link target.'),
   method: z.string().nullish().describe('Source link method.'),

@@ -172,5 +172,3 @@ export const HansardItemSchema = z.object({
     ),
   source: SourceSchema.describe('Actual request provenance and licence.'),
 });
-/** Normalized source contribution. */
-export type HansardItem = z.infer<typeof HansardItemSchema>;

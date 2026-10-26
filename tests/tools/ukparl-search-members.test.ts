@@ -108,6 +108,23 @@ describe('ukparl_search_members', () => {
     ])
       expect(text(result)).toContain(value);
   });
+  it.each([{}, { currentOnly: false }])(
+    'keeps historical searches valid with unrestricted membership %j',
+    async (filter) => {
+      const requests = installMembers(() => page([member()]));
+      const result = await runToolContract(ukparlSearchMembers, {
+        asOf: '2001-01-01',
+        ...filter,
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        mode: 'historical',
+        query: { asOf: '2001-01-01', currentOnly: false },
+        items: [{ memberId: '77' }],
+      });
+      expect(requests).toHaveLength(1);
+    },
+  );
   it.each([
     { house: 'commons' },
     { currentOnly: true },
@@ -117,10 +134,34 @@ describe('ukparl_search_members', () => {
     const requests = installMembers(() => page([]));
     const result = await runToolContract(ukparlSearchMembers, { asOf: '2001-01-01', ...filter });
     expect(result.structuredContent).toMatchObject({
-      error: { data: { reason: 'invalid_mode_arguments' } },
+      error: {
+        code: -32602,
+        message: `asOf cannot be combined with ${Object.keys(filter)[0] === 'currentOnly' ? 'currentOnly=true' : Object.keys(filter)[0]}; remove the conflicting filter or asOf.`,
+        data: {
+          reason: 'invalid_mode_arguments',
+          recovery: {
+            hint: 'Repeat ukparl_search_members with asOf and optional name only, or remove asOf to use modern filters.',
+          },
+        },
+      },
     });
     expect(text(result)).toContain('asOf');
     expect(text(result)).toContain('ukparl_search_members');
+    expect(requests).toEqual([]);
+  });
+  it('names every conflicting historical filter in deterministic order', async () => {
+    const requests = installMembers(() => page([]));
+    const result = await runToolContract(ukparlSearchMembers, {
+      asOf: '2001-01-01',
+      house: 'commons',
+      currentOnly: true,
+      partyId: '1',
+      constituency: 'Synthetic',
+    });
+    const message =
+      'asOf cannot be combined with constituency, partyId, house, currentOnly=true; remove the conflicting filter or asOf.';
+    expect(result.structuredContent).toMatchObject({ error: { message } });
+    expect(text(result)).toContain(message);
     expect(requests).toEqual([]);
   });
   it('discloses empty results and overcap limits, without adding current status', async () => {
