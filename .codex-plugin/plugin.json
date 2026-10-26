@@ -1,6 +1,6 @@
 {
   "name": "uk-parliament-mcp-server",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Search UK Parliament bills, members, votes, Hansard, written questions, and committees via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "cyanheads",
