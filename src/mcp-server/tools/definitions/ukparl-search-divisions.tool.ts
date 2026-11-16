@@ -56,7 +56,7 @@ const SelectionSchema = z.object({
     'Voters only: Commons aye/no/not_recorded or Lords content/not_content.',
   ),
   limit: LimitSchema.describe(
-    'Positive safe integer; search default 5/cap 10, voters default 20/cap 50.',
+    'Effective collection limit; search default 5, cap 24 Commons/10 Lords; voters default 20/cap 50.',
   ),
 });
 
@@ -75,7 +75,7 @@ export const ukparlSearchDivisions = tool('ukparl_search_divisions', {
     limit: LimitSchema.unwrap()
       .optional()
       .describe(
-        'Positive safe integer; search default 5/cap 10, voters default 20/cap 50; detail and party_totals do not paginate.',
+        'Positive safe integer; search default 5, cap 24 Commons/10 Lords; voters default 20/cap 50; detail and party_totals do not paginate.',
       ),
     cursor: optionalText(z.string().min(1)).describe(
       'Opaque search/voters collection continuation; repeat the same filters.',
@@ -150,7 +150,12 @@ export const ukparlSearchDivisions = tool('ukparl_search_divisions', {
     truncation: z
       .object({
         shown: z.number().int().describe('Whole items emitted.'),
-        cap: z.number().int().describe('Effective workload cap.'),
+        cap: z
+          .number()
+          .int()
+          .describe(
+            'Mode cap, the most whole items one page can return (search 24 Commons/10 Lords, voters 50); the effective limit is applied.limit.',
+          ),
       })
       .optional()
       .describe('Further collection rows remain; follow page.nextCursor.'),
@@ -244,7 +249,7 @@ export const ukparlSearchDivisions = tool('ukparl_search_divisions', {
       code: JsonRpcErrorCode.Conflict,
       when: 'A selected payload changed during content continuation.',
       recovery:
-        'Repeat the original selection without contentCursor and follow the newly returned content cursors.',
+        'Repeat the original selection and any collection cursor, but no contentCursor, and follow the newly returned content cursors.',
       thrownBy: 'service',
     },
     {
@@ -252,6 +257,22 @@ export const ukparlSearchDivisions = tool('ukparl_search_divisions', {
       code: JsonRpcErrorCode.RateLimited,
       when: 'The selected voting source request queue is full.',
       recovery: 'Wait briefly and repeat the same division request with unchanged filters.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'call_deadline_exceeded',
+      code: JsonRpcErrorCode.Timeout,
+      when: 'The 45-second call deadline elapsed before the official API answered.',
+      recovery:
+        'Repeat ukparl_search_divisions once after a short wait; if it times out again, use a shorter startDate to endDate window, a memberId or a more specific query.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'http_server_error',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'The official API returned an HTTP 5xx server error.',
+      recovery:
+        'Repeat ukparl_search_divisions with a shorter startDate to endDate window, a memberId or a more specific query; retry later if it still fails.',
       thrownBy: 'service',
     },
   ],
@@ -295,7 +316,12 @@ export const ukparlSearchDivisions = tool('ukparl_search_divisions', {
     if (conflicts.length) throw ctx.fail('invalid_mode', conflicts.join(' '));
     validateDateRange(input.startDate, input.endDate);
     const requested = input.limit ?? (input.mode === 'search' ? 5 : 20);
-    const limit = Math.min(requested, input.mode === 'search' ? 10 : 50);
+    /**
+     * Commons search routes serve at most 25 rows whatever take asks for, and the limit+1
+     * lookahead row that sets hasMore needs one of them.
+     */
+    const cap = input.mode !== 'search' ? 50 : input.house === 'commons' ? 24 : 10;
+    const limit = Math.min(requested, cap);
     const { contentCursor, ...selection } = input;
     using call = getParliamentHttp().beginCall(ctx);
     const result = await getDivisionsService().execute({ ...selection, limit }, call);
@@ -329,9 +355,7 @@ export const ukparlSearchDivisions = tool('ukparl_search_divisions', {
         notice: `${LICENCE_NOTICE} Search results are summaries; use detail or voters with the returned House and divisionId.${input.house === 'commons' ? ' not_recorded is a source list, not abstention.' : ' Lords teller-recorded counts are vote totals, separate from teller identities.'}${requested > limit ? ` Requested limit ${requested} is capped at ${limit}.` : ''}${selected.page?.returned === 0 ? ' No matching rows. Broaden search filters or remove party/lobby filters.' : ''}`,
         ...(requested > limit ? { requestedLimit: requested } : {}),
         ...(selected.page?.total !== undefined ? { totalCount: selected.page.total } : {}),
-        ...(selected.page?.hasMore
-          ? { truncation: { shown: selected.page.returned, cap: limit } }
-          : {}),
+        ...(selected.page?.hasMore ? { truncation: { shown: selected.page.returned, cap } } : {}),
       }),
       applyEnrichment: (values) => ctx.enrich(values),
     });

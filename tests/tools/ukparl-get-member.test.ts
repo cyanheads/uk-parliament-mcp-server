@@ -9,6 +9,9 @@ import { BiographyCategorySchema } from '@/services/members/member-models.js';
 import { disposeMembers } from '@/services/members/members-service.js';
 import {
   advanceCollectionCursor,
+  CollectionCursorSchema,
+  decodeCursor,
+  encodeCursor,
   readCollectionCursor,
 } from '@/services/parliament-http/parliament-cursors.js';
 import { disposeParliamentHttp } from '@/services/parliament-http/parliament-http-service.js';
@@ -18,13 +21,8 @@ import {
   page,
   withFullMembersQueue,
 } from '../services/members/members-fixtures.js';
+import { text } from './rendered-payload.js';
 
-function text(result: Awaited<ReturnType<typeof runToolContract>>) {
-  return result.content
-    .filter((block) => block.type === 'text')
-    .map((block) => block.text)
-    .join('\n');
-}
 function installSection(value: unknown) {
   return installMembers((url) =>
     url.pathname === '/api/Members/77'
@@ -32,6 +30,83 @@ function installSection(value: unknown) {
       : { value, links: [] },
   );
 }
+/**
+ * Rebuild the value behind one content cursor through actual bounded replies to `input`, checking
+ * that every reply fits 24,000 bytes and retains member identity and Members provenance.
+ */
+async function reconstruct(
+  input: { memberId: string; [key: string]: unknown },
+  contentCursor: string,
+): Promise<unknown> {
+  const reply = async (cursor: string) => {
+    const result = await runToolContract(ukparlGetMember, { ...input, contentCursor: cursor });
+    expect(result.isError, JSON.stringify(result.structuredContent)).not.toBe(true);
+    expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(24000);
+    const output = ukparlGetMember.output.parse(result.structuredContent);
+    expect(text(result)).toContain(output.contentPage!.path);
+    expect(output.identity).toEqual({ memberId: '77' });
+    expect(output.provenance).toMatchObject({
+      api: 'members',
+      licenceUrl: expect.any(String),
+      retrievedAt: expect.any(String),
+    });
+    return output.contentPage!;
+  };
+  const cp = await reply(contentCursor);
+  if (cp.fragment !== undefined) {
+    let fragments = cp.fragment;
+    let nextCursor = cp.nextCursor;
+    while (nextCursor) {
+      const part = await reply(nextCursor);
+      fragments += part.fragment!;
+      nextCursor = part.nextCursor;
+    }
+    return JSON.parse(fragments);
+  }
+  const value: Record<string, unknown> | unknown[] = cp.kind === 'array' ? [] : Object.create(null);
+  let entries = cp.entries!;
+  let nextCursor = cp.nextCursor;
+  while (true) {
+    for (const entry of entries) {
+      const key = entry.path
+        .slice(entry.path.lastIndexOf('/') + 1)
+        .replaceAll('~1', '/')
+        .replaceAll('~0', '~');
+      Reflect.set(value, key, await reconstruct(input, entry.contentCursor));
+    }
+    if (!nextCursor) break;
+    const part = await reply(nextCursor);
+    entries = part.entries!;
+    nextCursor = part.nextCursor;
+  }
+  return value;
+}
+/** Synthetic recorded votes; the vote at `oversizedIndex` alone exceeds the per-record limit. */
+function votes(count: number, oversizedIndex?: number) {
+  return Array.from({ length: count }, (_, i) => ({
+    id: 100 + i,
+    house: 1,
+    title: `${i}: ${'文🏛️'.repeat(i === oversizedIndex ? 2500 : 200)}`,
+    inAffirmativeLobby: i % 2 === 0,
+    inNegativeLobby: false,
+    actedAsTeller: null,
+  }));
+}
+/** Serve native 20-row Voting pages by `page` only, with the fixture's misleading skip metadata. */
+function installVoting(rows: ReturnType<typeof votes>) {
+  return installMembers((url) =>
+    url.pathname.endsWith('/Voting')
+      ? page(
+          rows.slice(
+            (Number(url.searchParams.get('page')) - 1) * 20,
+            Number(url.searchParams.get('page')) * 20,
+          ),
+          rows.length,
+        )
+      : { value: member() },
+  );
+}
+const voting = { memberId: '77', section: 'voting', house: 'commons' } as const;
 afterEach(() => {
   disposeMembers();
   disposeParliamentHttp();
@@ -54,6 +129,28 @@ describe('ukparl_get_member', () => {
         'Wait briefly, then repeat ukparl_get_member with the same selectors.',
       );
     });
+  });
+  it('renders an upstream 5xx and declares the call deadline with exact-tool recovery', async () => {
+    installMembers(() => new Response('', { status: 501 }));
+    const result = await runToolContract(ukparlGetMember, { memberId: '77' });
+    const hint = ukparlGetMember.errors?.find(
+      (entry) => entry.reason === 'http_server_error',
+    )?.recovery;
+    expect(hint).toContain('ukparl_get_member');
+    expect(result.structuredContent).toMatchObject({
+      // -32000 ServiceUnavailable
+      error: { code: -32000, data: { reason: 'http_server_error', recovery: { hint } } },
+    });
+    expect(text(result)).toContain('http_server_error');
+    expect(text(result)).toContain(hint);
+    expect(ukparlGetMember.errors).toContainEqual(
+      expect.objectContaining({
+        reason: 'call_deadline_exceeded',
+        code: -32004, // Timeout
+        thrownBy: 'service',
+        recovery: expect.stringContaining('ukparl_get_member'),
+      }),
+    );
   });
   it('preserves sparse profile and relationship links without fetching other sections', async () => {
     const requests = installSection(null);
@@ -350,7 +447,9 @@ describe('ukparl_get_member', () => {
     expect(rebound.structuredContent).toMatchObject({
       error: { data: { reason: 'invalid_cursor' } },
     });
-    expect(text(rebound)).toContain('same filters');
+    expect(text(rebound)).toContain(
+      'Repeat ukparl_get_member with the same memberId, section, category and house and no cursor or contentCursor to restart.',
+    );
   });
   it('keeps committee person and MNIS namespaces, all nested occurrences and unknown collection states', async () => {
     const requests = installMembers((url) =>
@@ -502,63 +601,13 @@ describe('ukparl_get_member', () => {
     const initial = ukparlGetMember.output.parse(first.structuredContent);
     expect(initial.delivery).toBe('outline');
     const firstCursor = initial.contentPage!.entries![0]!.contentCursor;
-    async function retrieve(contentCursor: string): Promise<unknown> {
-      const result = await runToolContract(ukparlGetMember, { memberId: '77', contentCursor });
-      expect(result.isError, JSON.stringify(result.structuredContent)).not.toBe(true);
-      expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(24000);
-      const output = ukparlGetMember.output.parse(result.structuredContent);
-      const cp = output.contentPage!;
-      expect(text(result)).toContain(cp.path);
-      expect(output.identity).toEqual({ memberId: '77' });
-      expect(output.provenance).toMatchObject({
-        api: 'members',
-        licenceUrl: expect.any(String),
-        retrievedAt: expect.any(String),
-      });
-      if (cp.fragment !== undefined) {
-        let fragments = cp.fragment;
-        let nextCursor = cp.nextCursor;
-        while (nextCursor) {
-          const next = await runToolContract(ukparlGetMember, {
-            memberId: '77',
-            contentCursor: nextCursor,
-          });
-          expect(next.isError).not.toBe(true);
-          expect(Buffer.byteLength(JSON.stringify(next))).toBeLessThanOrEqual(24000);
-          const part = ukparlGetMember.output.parse(next.structuredContent).contentPage!;
-          fragments += part.fragment!;
-          nextCursor = part.nextCursor;
-        }
-        return JSON.parse(fragments);
-      }
-      const value: Record<string, unknown> | unknown[] =
-        cp.kind === 'array' ? [] : Object.create(null);
-      let entries = cp.entries!;
-      let nextCursor = cp.nextCursor;
-      while (true) {
-        for (const entry of entries) {
-          const key = entry.path
-            .slice(entry.path.lastIndexOf('/') + 1)
-            .replaceAll('~1', '/')
-            .replaceAll('~0', '~');
-          Reflect.set(value, key, await retrieve(entry.contentCursor));
-        }
-        if (!nextCursor) break;
-        const next = await runToolContract(ukparlGetMember, {
-          memberId: '77',
-          contentCursor: nextCursor,
-        });
-        expect(next.isError).not.toBe(true);
-        expect(Buffer.byteLength(JSON.stringify(next))).toBeLessThanOrEqual(24000);
-        const part = ukparlGetMember.output.parse(next.structuredContent).contentPage!;
-        entries = part.entries!;
-        nextCursor = part.nextCursor;
-      }
-      return value;
-    }
     const rebuilt: Record<string, unknown> = Object.create(null);
     for (const entry of initial.contentPage!.entries!)
-      Reflect.set(rebuilt, entry.path.slice(1), await retrieve(entry.contentCursor));
+      Reflect.set(
+        rebuilt,
+        entry.path.slice(1),
+        await reconstruct({ memberId: '77' }, entry.contentCursor),
+      );
     expect(rebuilt).toMatchObject({
       record: { value: { nameFullTitle: title } },
       source: { api: 'members', url: 'https://members-api.parliament.uk/api/Members/77' },
@@ -579,49 +628,36 @@ describe('ukparl_get_member', () => {
     expect(changed.structuredContent).toMatchObject({
       error: { data: { reason: 'source_changed' } },
     });
-    expect(text(changed)).toContain('original filters');
-  });
-  it('re-fetches native vote remainders before page two, ignoring false skip and next-link metadata', async () => {
-    const votes = Array.from({ length: 23 }, (_, i) => ({
-      id: 100 + i,
-      house: 1,
-      title: `${i}: ${'文🏛️'.repeat(200)}`,
-      inAffirmativeLobby: i % 2 === 0,
-      inNegativeLobby: false,
-      actedAsTeller: null,
-    }));
-    const requests = installMembers((url) =>
-      url.pathname.endsWith('/Voting')
-        ? page(
-            votes.slice(
-              (Number(url.searchParams.get('page')) - 1) * 20,
-              Number(url.searchParams.get('page')) * 20,
-            ),
-            23,
-          )
-        : { value: member() },
+    expect(text(changed)).toContain(
+      'Repeat ukparl_get_member with original selectors and any collection cursor, but no contentCursor, then follow the new content cursors.',
     );
+  });
+  it('serves each native 20-row vote page whole in one call, whatever the caller limit', async () => {
+    const rows = votes(23);
+    const requests = installVoting(rows);
     const ids: string[] = [];
     let cursor: string | undefined;
-    const nativePages: number[] = [];
-    do {
+    for (const [limit, nativePage, returned] of [
+      [1, 1, 20],
+      [50, 2, 3],
+    ] as const) {
       const result = await runToolContract(ukparlGetMember, {
-        memberId: '77',
-        section: 'voting',
-        house: 'commons',
-        limit: 1,
+        ...voting,
+        limit,
         ...(cursor ? { cursor } : {}),
       });
       expect(result.isError).not.toBe(true);
-      expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(24000);
+      // A native page is returned whole even when the reply exceeds 24,000 bytes.
+      if (returned === 20) expect(Buffer.byteLength(JSON.stringify(result))).toBeGreaterThan(24000);
       const output = ukparlGetMember.output.parse(result.structuredContent);
-      expect(output.delivery).toBe('full');
-      expect(output.nativePage).toBe(Math.floor(ids.length / 20) + 1);
-      nativePages.push(output.nativePage!);
+      expect(output).toMatchObject({ delivery: 'full', nativePage, nativePageSize: 20 });
+      expect(requests.at(-1)!.searchParams.get('page')).toBe(String(nativePage));
       expect(result.structuredContent).toMatchObject({
-        requestedLimit: 1,
+        page: { returned, total: 23, hasMore: nativePage === 1 },
+        applied: { limit: 20 },
+        requestedLimit: limit,
+        shown: returned,
         cap: 20,
-        shown: output.items!.length,
       });
       for (const vote of output.items!) {
         if (vote.kind !== 'vote') throw new Error('Wrong vote kind');
@@ -630,13 +666,127 @@ describe('ukparl_get_member', () => {
       }
       expect(text(result)).toContain('Neither lobby flag alone establishes abstention');
       cursor = output.page!.nextCursor;
-    } while (cursor);
-    expect(ids).toEqual(Array.from({ length: 23 }, (_, i) => String(100 + i)));
-    expect(nativePages.filter((n) => n === 1).length).toBeGreaterThan(1);
-    expect(nativePages.at(-1)).toBe(2);
-    for (const request of requests.filter((url) => url.pathname.endsWith('/Voting'))) {
+    }
+    expect(cursor).toBeUndefined();
+    expect(ids).toEqual(rows.map((vote) => String(vote.id)));
+    const votingRequests = requests.filter((url) => url.pathname.endsWith('/Voting'));
+    expect(votingRequests.map((url) => url.searchParams.get('page'))).toEqual(['1', '2']);
+    for (const request of votingRequests) {
       expect(request.searchParams.has('skip')).toBe(false);
       expect(request.searchParams.get('house')).toBe('1');
     }
+  });
+  it('stops before an oversized vote, re-fetches the native remainder and keeps the page-size binding', async () => {
+    const rows = votes(23, 7);
+    const requests = installVoting(rows);
+    const votingPage = () => requests.filter((url) => url.pathname.endsWith('/Voting')).at(-1);
+    const ids: string[] = [];
+    const collect = (items: ReturnType<typeof ukparlGetMember.output.parse>['items']) => {
+      for (const vote of items!) {
+        if (vote.kind !== 'vote') throw new Error('Wrong vote kind');
+        ids.push(vote.divisionId);
+      }
+    };
+    const first = await runToolContract(ukparlGetMember, { ...voting, limit: 20 });
+    const head = ukparlGetMember.output.parse(first.structuredContent);
+    expect(head).toMatchObject({
+      delivery: 'full',
+      nativePage: 1,
+      page: { returned: 7, total: 23, hasMore: true },
+    });
+    collect(head.items);
+    const remainder = head.page!.nextCursor!;
+    expect(decodeCursor(remainder, CollectionCursorSchema)).toMatchObject({
+      offset: 7,
+      nativePage: 1,
+      nativePageSize: 20,
+      intraPageOffset: 7,
+    });
+    // A native-page cursor stays bound to its page size; it is rejected before any request.
+    const before = requests.length;
+    const rebound = await runToolContract(ukparlGetMember, {
+      ...voting,
+      cursor: encodeCursor({
+        ...decodeCursor(remainder, CollectionCursorSchema),
+        nativePageSize: 10,
+      }),
+    });
+    expect(rebound.structuredContent).toMatchObject({
+      error: { data: { reason: 'invalid_cursor' } },
+    });
+    expect(requests).toHaveLength(before);
+    // The remainder re-fetches native page one; its oversized leading vote is served alone.
+    const outlined = await runToolContract(ukparlGetMember, {
+      ...voting,
+      limit: 1,
+      cursor: remainder,
+    });
+    expect(outlined.isError).not.toBe(true);
+    expect(votingPage()!.searchParams.get('page')).toBe('1');
+    const root = ukparlGetMember.output.parse(outlined.structuredContent);
+    expect(root).toMatchObject({
+      delivery: 'outline',
+      identity: { memberId: '77' },
+      collectionPage: { returned: 1, total: 23, hasMore: true },
+    });
+    expect(outlined.structuredContent).toMatchObject({ shown: 1, truncated: true, cap: 20 });
+    const rebuilt: Record<string, unknown> = Object.create(null);
+    for (const entry of root.contentPage!.entries!)
+      Reflect.set(
+        rebuilt,
+        entry.path.slice(1),
+        await reconstruct({ ...voting, limit: 1, cursor: remainder }, entry.contentCursor),
+      );
+    expect(rebuilt).toMatchObject({
+      nativePage: 1,
+      items: [{ kind: 'vote', divisionId: '107', value: { title: rows[7]!.title } }],
+      page: root.collectionPage,
+    });
+    expect(rebuilt.items).toHaveLength(1);
+    ids.push('107');
+    const rest = await runToolContract(ukparlGetMember, {
+      ...voting,
+      cursor: root.collectionPage!.nextCursor,
+    });
+    expect(votingPage()!.searchParams.get('page')).toBe('1');
+    const tail = ukparlGetMember.output.parse(rest.structuredContent);
+    expect(tail).toMatchObject({
+      delivery: 'full',
+      nativePage: 1,
+      page: { returned: 12, total: 23, hasMore: true },
+    });
+    collect(tail.items);
+    const last = await runToolContract(ukparlGetMember, {
+      ...voting,
+      cursor: tail.page!.nextCursor,
+    });
+    expect(votingPage()!.searchParams.get('page')).toBe('2');
+    const end = ukparlGetMember.output.parse(last.structuredContent);
+    expect(end).toMatchObject({ nativePage: 2, page: { returned: 3, total: 23, hasMore: false } });
+    collect(end.items);
+    expect(ids).toEqual(rows.map((vote) => String(vote.id)));
+  });
+  it('reports the 50-row history ceiling as cap and resumes an offset cursor under a changed limit', async () => {
+    const periods = [91, 92, 93].map((id) => ({ id, name: `Synthetic period ${id}` }));
+    installSection({ representations: periods });
+    const selection = { memberId: '77', section: 'roles', category: 'representations' } as const;
+    const first = await runToolContract(ukparlGetMember, { ...selection, limit: 2 });
+    expect(first.structuredContent).toMatchObject({
+      items: periods.slice(0, 2).map((value) => ({ kind: 'role', value })),
+      page: { returned: 2, total: 3, hasMore: true },
+      applied: { limit: 2 },
+      shown: 2,
+      cap: 50,
+    });
+    expect(first.structuredContent).not.toHaveProperty('requestedLimit');
+    const cursor = ukparlGetMember.output.parse(first.structuredContent).page!.nextCursor!;
+    const rest = await runToolContract(ukparlGetMember, { ...selection, limit: 50, cursor });
+    expect(rest.isError).not.toBe(true);
+    expect(rest.structuredContent).toMatchObject({
+      items: [{ kind: 'role', value: periods[2] }],
+      page: { returned: 1, total: 3, hasMore: false },
+      applied: { limit: 50 },
+      cap: 50,
+    });
   });
 });

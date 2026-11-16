@@ -12,22 +12,21 @@ import {
   business,
   businessDetail,
   committeeDetail,
+  documentEnvelope,
   evidence,
+  htmlEvidence,
   installCommittees,
   membership,
   page,
   publication,
   reconstruct,
+  transcript,
   withFullCommitteeQueue,
+  without,
 } from '../services/committees/committees-fixtures.js';
-import { renderedPayload } from './rendered-payload.js';
+import { renderedPayload, text } from './rendered-payload.js';
 
 type Result = Awaited<ReturnType<typeof runToolContract>>;
-const text = (result: Result) =>
-  result.content
-    .filter((block) => block.type === 'text')
-    .map((block) => block.text)
-    .join('\n');
 
 /** Decode the complete public JSON representation and compare every payload field. */
 function assertRendered(value: unknown, rendered: string): void {
@@ -42,11 +41,14 @@ async function retrieve(input: Record<string, unknown>, first: Result): Promise<
   let currentResult = first;
   expect(renderedPayload(text(first))).toEqual(JSON.parse(JSON.stringify(first.structuredContent)));
   expect(first.isError).not.toBe(true);
-  expect(Buffer.byteLength(JSON.stringify(first))).toBeLessThanOrEqual(24000);
   if (output.delivery === 'full') {
+    // A full page is unbounded; only a record whose own JSON passes 24,000 bytes is outlined.
+    for (const record of [output.record, ...(output.items ?? [])])
+      if (record) expect(Buffer.byteLength(JSON.stringify(record))).toBeLessThanOrEqual(24000);
     assertRendered(output, text(first));
     return output;
   }
+  expect(Buffer.byteLength(JSON.stringify(first))).toBeLessThanOrEqual(24000);
   const initial = output.contentPage!;
   let fragments = '';
   const entries = new Map<string, unknown>();
@@ -122,9 +124,9 @@ describe('ukparl_get_committee', () => {
     expect(detail.isError).not.toBe(true);
     expect(detail.structuredContent).toMatchObject({ found: true, filters: { businessId: '31' } });
     expect(global.isError).not.toBe(true);
-    expect(global.structuredContent).toMatchObject({
-      filters: { query: 'ab', acceptingEvidence: false },
-    });
+    expect(
+      JSON.parse(JSON.stringify(ukparlGetCommittee.output.parse(global.structuredContent).filters)),
+    ).toStrictEqual({ query: 'ab' });
     expect(requests).toHaveLength(2);
   });
   it.each([
@@ -142,6 +144,26 @@ describe('ukparl_get_committee', () => {
     [
       { mode: 'evidence_detail', evidenceId: '91' },
       'mode=evidence_detail requires evidenceType=written or evidenceType=oral',
+    ],
+    [
+      { mode: 'evidence_document', evidenceType: 'oral' },
+      'mode=evidence_document requires evidenceId; supply evidenceId from mode=evidence with the same evidenceType',
+    ],
+    [
+      { mode: 'evidence_document', evidenceId: '91' },
+      'mode=evidence_document requires evidenceType=written or evidenceType=oral',
+    ],
+    [
+      { mode: 'evidence_document', evidenceId: '91', evidenceType: 'oral', limit: 1 },
+      'limit is unsupported for singular mode=evidence_document; omit limit',
+    ],
+    [
+      { mode: 'evidence_document', evidenceId: '91', evidenceType: 'oral', businessId: '31' },
+      'businessId is unsupported for mode=evidence_document; omit businessId or select mode=inquiry, publications or evidence',
+    ],
+    [
+      { mode: 'evidence', businessId: '31', evidenceType: 'oral', evidenceId: '91' },
+      'evidenceId is unsupported for mode=evidence; omit evidenceId or select mode=evidence_detail or evidence_document',
     ],
     [
       { mode: 'members', committeeId: '11', house: 'commons' },
@@ -225,7 +247,7 @@ describe('ukparl_get_committee', () => {
     expect(text(result)).toContain(expected);
     expect(requests).toHaveLength(0);
   });
-  it('passes exact business filters globally and preserves false as unrestricted source selection', async () => {
+  it('passes exact business filters globally and drops a false acceptingEvidence, which the source ignores', async () => {
     const requests = installCommittees(() => page([{ id: 31, type: { id: 2, isInquiry: false } }]));
     const input = {
       mode: 'inquiries',
@@ -239,18 +261,16 @@ describe('ukparl_get_committee', () => {
     expect(result.isError).not.toBe(true);
     expect([...requests[0]!.searchParams]).toEqual([
       ['Status', 'Open'],
-      ['CurrentlyAcceptingEvidence', 'false'],
       ['DateFrom', '2026-01-01'],
       ['DateTo', '2026-10-01'],
       ['SortOrder', 'DateOpenedNewest'],
       ['ShowOnWebsiteOnly', 'true'],
       ['Skip', '0'],
-      ['Take', '20'],
+      ['Take', '10'],
     ]);
     const output = ukparlGetCommittee.output.parse(result.structuredContent);
     expect(JSON.parse(JSON.stringify(output.filters))).toEqual({
       status: 'Open',
-      acceptingEvidence: false,
       openedFrom: '2026-01-01',
       openedTo: '2026-10-01',
       sortOrder: 'DateOpenedNewest',
@@ -284,7 +304,7 @@ describe('ukparl_get_committee', () => {
       ['EndDate', '2026-10-01'],
       ['ShowOnWebsiteOnly', 'true'],
       ['Skip', '0'],
-      ['Take', '20'],
+      ['Take', '10'],
     ]);
     const output = ukparlGetCommittee.output.parse(result.structuredContent);
     expect(output.items!.map((item) => item.recordId)).toEqual(['52', '51']);
@@ -326,9 +346,12 @@ describe('ukparl_get_committee', () => {
     expect(output.items!.map(reconstruct)).toStrictEqual(raw);
     assertRendered(output, text(result));
   });
-  it.each([true, false])(
-    'preserves acceptingEvidence=%s and source Open/Closed states',
-    async (acceptingEvidence) => {
+  it.each([
+    [true, 'true'],
+    [false, null],
+  ] as const)(
+    'sends acceptingEvidence=%s as %s beside source Open/Closed states',
+    async (acceptingEvidence, sent) => {
       const requests = installCommittees(() => page([]));
       const result = await runToolContract(ukparlGetCommittee, {
         mode: 'inquiries',
@@ -336,13 +359,53 @@ describe('ukparl_get_committee', () => {
         acceptingEvidence,
       });
       expect(result.isError).not.toBe(true);
-      expect(requests[0]!.searchParams.get('CurrentlyAcceptingEvidence')).toBe(
-        String(acceptingEvidence),
-      );
+      expect(requests[0]!.searchParams.get('CurrentlyAcceptingEvidence')).toBe(sent);
       expect(requests[0]!.searchParams.get('Status')).toBe('Closed');
-      assertRendered(ukparlGetCommittee.output.parse(result.structuredContent), text(result));
+      const output = ukparlGetCommittee.output.parse(result.structuredContent);
+      expect(output.filters?.acceptingEvidence).toBe(acceptingEvidence || undefined);
+      assertRendered(output, text(result));
     },
   );
+
+  it('treats acceptingEvidence=false exactly as omitted: echo, source URL and both cursors', async () => {
+    const requests = installCommittees((url) =>
+      page(Number(url.searchParams.get('Skip')) === 0 ? [{ id: 31 }] : [{ id: 32 }], 2),
+    );
+    const base = { mode: 'inquiries', status: 'Open', limit: 1 } as const;
+    const run = (extra: object) => runToolContract(ukparlGetCommittee, { ...base, ...extra });
+    const [withFalse, omitted] = [await run({ acceptingEvidence: false }), await run({})];
+    const echo = (result: Result) => {
+      const {
+        filters,
+        source,
+        page: collection,
+      } = ukparlGetCommittee.output.parse(result.structuredContent);
+      return {
+        filters: JSON.parse(JSON.stringify(filters)),
+        url: source?.url,
+        applied: (result.structuredContent as { applied?: unknown }).applied,
+        nextCursor: collection?.nextCursor,
+      };
+    };
+    expect(echo(withFalse)).toStrictEqual(echo(omitted));
+    expect(echo(withFalse).filters).toStrictEqual({ status: 'Open' });
+    expect(echo(withFalse).url).not.toContain('CurrentlyAcceptingEvidence');
+    for (const [minted, followed] of [
+      [withFalse, {}],
+      [omitted, { acceptingEvidence: false }],
+    ] as const) {
+      const next = await run({ ...followed, cursor: echo(minted).nextCursor });
+      expect(next.isError).not.toBe(true);
+      expect(
+        ukparlGetCommittee.output.parse(next.structuredContent).items!.map(reconstruct),
+      ).toStrictEqual([{ id: 32 }]);
+    }
+    const accepting = await run({ acceptingEvidence: true, cursor: echo(omitted).nextCursor });
+    expect(accepting.structuredContent).toMatchObject({
+      error: { data: { reason: 'invalid_cursor' } },
+    });
+    expect(requests.map((url) => url.searchParams.get('Skip'))).toEqual(['0', '0', '1', '1']);
+  });
   it('omits blank new selectors and preserves existing source defaults', async () => {
     const requests = installCommittees(() => page([]));
     const result = await runToolContract(ukparlGetCommittee, {
@@ -361,7 +424,7 @@ describe('ukparl_get_committee', () => {
       ['CommitteeId', '11'],
       ['ShowOnWebsiteOnly', 'true'],
       ['Skip', '0'],
-      ['Take', '20'],
+      ['Take', '10'],
     ]);
     expect(
       JSON.parse(JSON.stringify(ukparlGetCommittee.output.parse(result.structuredContent).filters)),
@@ -454,7 +517,8 @@ describe('ukparl_get_committee', () => {
     expect(requests).toHaveLength(0);
   });
   it.each([
-    [{ mode: 'inquiries', acceptingEvidence: 'false' }, 'CurrentlyAcceptingEvidence', 'false'],
+    [{ mode: 'inquiries', acceptingEvidence: 'true' }, 'CurrentlyAcceptingEvidence', 'true'],
+    [{ mode: 'inquiries', acceptingEvidence: 'false' }, 'CurrentlyAcceptingEvidence', null],
     [
       { mode: 'publications', committeeId: '11', publicationTypeIds: [1] },
       'PublicationTypeIds',
@@ -592,7 +656,7 @@ describe('ukparl_get_committee', () => {
         error: {
           data: {
             reason: 'invalid_cursor',
-            recovery: { hint: expect.stringContaining('same filters') },
+            recovery: { hint: expect.stringContaining('unchanged filters') },
           },
         },
       });
@@ -657,14 +721,17 @@ describe('ukparl_get_committee', () => {
   it.each(['written', 'oral'] as const)(
     'retrieves complete %s evidence list/detail through both surfaces',
     async (evidenceType) => {
-      const raw = evidence(evidenceType);
+      const raw = htmlEvidence(evidenceType);
       const route = evidenceType === 'written' ? 'WrittenEvidence' : 'OralEvidence';
       const requests = installCommittees((url) =>
         url.pathname.endsWith('/91') ? raw : page([raw]),
       );
-      for (const input of [
-        { mode: 'evidence', evidenceType, businessId: '31' },
-        { mode: 'evidence_detail', evidenceType, evidenceId: '91' },
+      // Written list items omit the committee and business repeated on every row; oral keep theirs.
+      const listed =
+        evidenceType === 'written' ? without(raw, 'committees', 'committeeBusiness') : raw;
+      for (const [input, expected] of [
+        [{ mode: 'evidence', evidenceType, businessId: '31' }, listed],
+        [{ mode: 'evidence_detail', evidenceType, evidenceId: '91' }, raw],
       ] as const) {
         const result = await runToolContract(ukparlGetCommittee, input);
         expect(result.isError).not.toBe(true);
@@ -674,14 +741,14 @@ describe('ukparl_get_committee', () => {
         });
         const record = output.record ?? output.items![0]!;
         expect(record.recordType).toBe(`${evidenceType}_evidence`);
-        expect(reconstruct(record)).toStrictEqual(raw);
+        expect(reconstruct(record)).toStrictEqual(expected);
       }
-      expect(requests.every((url) => url.pathname.startsWith(`/api/${route}`))).toBe(true);
+      expect(requests.map((url) => url.pathname)).toEqual([`/api/${route}`, `/api/${route}/91`]);
       expect([...requests[0]!.searchParams]).toEqual([
         ['CommitteeBusinessId', '31'],
         ['ShowOnWebsiteOnly', 'true'],
         ['Skip', '0'],
-        ['Take', '20'],
+        ['Take', '10'],
       ]);
       expect([...requests.at(-1)!.searchParams]).toEqual([['showOnWebsiteOnly', 'true']]);
     },
@@ -732,7 +799,9 @@ describe('ukparl_get_committee', () => {
       ...((await retrieve(input, first)) as object),
       delivery: 'full',
     });
-    expect(reconstruct(output.items![0]!)).toStrictEqual(raw);
+    expect(reconstruct(output.items![0]!)).toStrictEqual(
+      without(raw, 'committees', 'committeeBusiness'),
+    );
     const contentCursor = ukparlGetCommittee.output.parse(first.structuredContent).contentPage!
       .entries![0]!.contentCursor;
     const before = requests.length;
@@ -781,17 +850,243 @@ describe('ukparl_get_committee', () => {
       });
       expect(requests).toHaveLength(before);
       empty = true;
-      const capped = await runToolContract(ukparlGetCommittee, { ...input, limit: 100 });
+      const capped = await runToolContract(ukparlGetCommittee, { ...input, limit: 101 });
       expect(capped.structuredContent).toMatchObject({
-        requestedLimit: 100,
-        cap: 50,
+        requestedLimit: 101,
+        cap: 100,
         items: [],
         page: { total: 0, returned: 0 },
       });
-      expect(text(capped)).toContain('capped at 50');
-      expect(requests.at(-1)!.searchParams.get('Take')).toBe('50');
+      expect(text(capped)).toContain('Requested limit 101 is capped at 100.');
+      expect(requests.at(-1)!.searchParams.get('Take')).toBe('100');
     },
   );
+  it.each([
+    ['written', 'WrittenEvidence'],
+    ['oral', 'OralEvidence'],
+  ] as const)(
+    'returns the %s record plus its verbatim Html rendition on both surfaces',
+    async (evidenceType, route) => {
+      const html = '<html><body><p class="q">“Evidence” Ω 🏛️ \\ `x`</p>\r\n</body></html>';
+      const raw = htmlEvidence(evidenceType);
+      const requests = installCommittees((url) =>
+        url.pathname.endsWith('/Document/Html') ? documentEnvelope(html) : raw,
+      );
+      const input = { mode: 'evidence_document', evidenceType, evidenceId: '91' } as const;
+      const result = await runToolContract(ukparlGetCommittee, input);
+      const output = ukparlGetCommittee.output.parse({
+        ...((await retrieve(input, result)) as object),
+        delivery: 'full',
+      });
+      expect(output).toMatchObject({ mode: 'evidence_document', found: true, documentHtml: html });
+      expect(reconstruct(output.record!)).toStrictEqual(raw);
+      expect(output.documentSource?.url).toBe(
+        `https://committees-api.parliament.uk/api/${route}/91/Document/Html?showOnWebsiteOnly=true`,
+      );
+      expect(requests.map((url) => url.pathname)).toEqual([
+        `/api/${route}/91`,
+        `/api/${route}/91/Document/Html`,
+      ]);
+      expect(text(result)).not.toContain('No Html rendition is published');
+    },
+  );
+
+  it('reconstructs a 179,287-byte oral transcript through content continuation on both surfaces', async () => {
+    const html = transcript(179_287);
+    const raw = htmlEvidence('oral');
+    const requests = installCommittees((url) =>
+      url.pathname.endsWith('/Document/Html') ? documentEnvelope(html) : raw,
+    );
+    const input = { mode: 'evidence_document', evidenceType: 'oral', evidenceId: '91' } as const;
+    const first = await runToolContract(ukparlGetCommittee, input);
+    expect(ukparlGetCommittee.output.parse(first.structuredContent).delivery).toBe('outline');
+    const decoded = ukparlGetCommittee.output.parse({
+      ...((await retrieve(input, first)) as object),
+      delivery: 'full',
+    });
+    expect(decoded.documentHtml).toBe(html);
+    expect(Buffer.byteLength(decoded.documentHtml!)).toBe(179_287);
+    expect(reconstruct(decoded.record!)).toStrictEqual(raw);
+    expect(requests.length).toBeGreaterThan(4);
+    expect(
+      requests.every((url) =>
+        ['/api/OralEvidence/91', '/api/OralEvidence/91/Document/Html'].includes(url.pathname),
+      ),
+    ).toBe(true);
+  });
+
+  it.each([
+    ['lists no Html rendition', () => evidence('written'), () => documentEnvelope('unused'), 1],
+    [
+      'gets a document 404',
+      () => htmlEvidence('written'),
+      () => new Response(null, { status: 404 }),
+      2,
+    ],
+  ] as const)(
+    'keeps found: true with a notice when the record %s',
+    async (_, record, document, expectedRequests) => {
+      const raw = record();
+      const requests = installCommittees((url) =>
+        url.pathname.endsWith('/Document/Html') ? document() : raw,
+      );
+      const result = await runToolContract(ukparlGetCommittee, {
+        mode: 'evidence_document',
+        evidenceType: 'written',
+        evidenceId: '91',
+      });
+      expect(result.isError).not.toBe(true);
+      const output = ukparlGetCommittee.output.parse(result.structuredContent);
+      expect(output).toMatchObject({ found: true });
+      expect(output).not.toHaveProperty('documentHtml');
+      expect(output).not.toHaveProperty('documentSource');
+      expect(reconstruct(output.record!)).toStrictEqual(raw);
+      expect(result.structuredContent).toMatchObject({
+        notice: expect.stringContaining('No Html rendition is published for this evidence.'),
+      });
+      expect(text(result)).toContain('No Html rendition is published for this evidence.');
+      assertRendered(output, text(result));
+      expect(requests).toHaveLength(expectedRequests);
+    },
+  );
+
+  it('returns found: false for a missing evidence record without a document request', async () => {
+    const requests = installCommittees(() => new Response('missing', { status: 404 }));
+    const result = await runToolContract(ukparlGetCommittee, {
+      mode: 'evidence_document',
+      evidenceType: 'oral',
+      evidenceId: '999',
+    });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({ found: false });
+    expect(result.structuredContent).not.toHaveProperty('documentHtml');
+    expect(text(result)).toContain('evidence mode');
+    expect(requests.map((url) => url.pathname)).toEqual(['/api/OralEvidence/999']);
+  });
+
+  it('fails a stalled document read as call_deadline_exceeded, never found: true without it', async () => {
+    vi.useFakeTimers();
+    const { initParliamentHttp } = await import(
+      '@/services/parliament-http/parliament-http-service.js'
+    );
+    const { initCommittees } = await import('@/services/committees/committees-service.js');
+    const record = htmlEvidence('written');
+    const paths: string[] = [];
+    initParliamentHttp({
+      exchange: async (url, _timeoutMs, _ctx, signal) => {
+        paths.push(url.pathname);
+        if (!url.pathname.endsWith('/Document/Html')) return Response.json(record);
+        return new Promise<Response>((_resolve, reject) =>
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true }),
+        );
+      },
+    });
+    initCommittees();
+    const pending = runToolContract(ukparlGetCommittee, {
+      mode: 'evidence_document',
+      evidenceType: 'written',
+      evidenceId: '91',
+    });
+    await vi.advanceTimersByTimeAsync(45_000);
+    const result = await pending;
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).not.toHaveProperty('found');
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.Timeout, data: { reason: 'call_deadline_exceeded' } },
+    });
+    expect(text(result)).toContain('call_deadline_exceeded');
+    expect(text(result)).not.toContain('No Html rendition is published');
+    expect(paths).toEqual(['/api/WrittenEvidence/91', '/api/WrittenEvidence/91/Document/Html']);
+  });
+
+  it('fails a document 5xx with http_server_error on both surfaces, never found: false', async () => {
+    vi.useFakeTimers();
+    const requests = installCommittees((url) =>
+      url.pathname.endsWith('/Document/Html')
+        ? new Response('PRIVATE UPSTREAM BODY', { status: 500 })
+        : htmlEvidence('written'),
+    );
+    const pending = runToolContract(ukparlGetCommittee, {
+      mode: 'evidence_document',
+      evidenceType: 'written',
+      evidenceId: '91',
+    });
+    await vi.runAllTimersAsync();
+    const result = await pending;
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).not.toHaveProperty('found');
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        data: {
+          reason: 'http_server_error',
+          recovery: { hint: expect.stringContaining('ukparl_get_committee') },
+        },
+      },
+    });
+    expect(text(result)).toContain('http_server_error');
+    expect(text(result)).not.toContain('PRIVATE UPSTREAM BODY');
+    expect(requests.filter((url) => url.pathname.endsWith('/Document/Html'))).toHaveLength(3);
+  });
+
+  it('fails a malformed document envelope as a validation error on both surfaces', async () => {
+    const requests = installCommittees((url) =>
+      url.pathname.endsWith('/Document/Html')
+        ? documentEnvelope('', 'not base64!')
+        : htmlEvidence('written'),
+    );
+    const result = await runToolContract(ukparlGetCommittee, {
+      mode: 'evidence_document',
+      evidenceType: 'written',
+      evidenceId: '91',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).not.toHaveProperty('found');
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.ValidationError, data: { retryable: false } },
+    });
+    expect(text(result)).toContain('not canonical base64');
+    expect(requests).toHaveLength(2);
+  });
+
+  it('binds content cursors to evidence_detail or evidence_document, never both', async () => {
+    const raw = {
+      ...htmlEvidence('written'),
+      anonymousWitnessText: 'Source HTML <p>Ω</p> '.repeat(4000),
+    };
+    installCommittees((url) =>
+      url.pathname.endsWith('/Document/Html') ? documentEnvelope('<p>short</p>') : raw,
+    );
+    const selection = { evidenceType: 'written', evidenceId: '91' } as const;
+    const cursorFor = async (mode: 'evidence_detail' | 'evidence_document') => {
+      const result = await runToolContract(ukparlGetCommittee, { mode, ...selection });
+      const output = ukparlGetCommittee.output.parse(result.structuredContent);
+      expect(output.delivery).toBe('outline');
+      return output.contentPage!.entries![0]!.contentCursor;
+    };
+    for (const [minted, followed] of [
+      ['evidence_detail', 'evidence_document'],
+      ['evidence_document', 'evidence_detail'],
+    ] as const) {
+      const contentCursor = await cursorFor(minted);
+      const same = await runToolContract(ukparlGetCommittee, {
+        mode: minted,
+        ...selection,
+        contentCursor,
+      });
+      expect(same.isError).not.toBe(true);
+      const crossed = await runToolContract(ukparlGetCommittee, {
+        mode: followed,
+        ...selection,
+        contentCursor,
+      });
+      expect(crossed.structuredContent).toMatchObject({
+        error: { data: { reason: 'invalid_cursor' } },
+      });
+      expect(text(crossed)).toContain('invalid_cursor');
+    }
+  });
+
   it('characterizes sparse publication null and omitted document metadata on both surfaces', async () => {
     const raw = {
       id: 51,
@@ -822,11 +1117,13 @@ describe('ukparl_get_committee', () => {
       expect(reconstruct(payload.record!)).toStrictEqual(raw);
       expect(requests.every((url) => url.pathname === path)).toBe(true);
       expect([...requests[0]!.searchParams]).toEqual([['showOnWebsiteOnly', 'true']]);
+      const access =
+        'Only mode=evidence_document downloads a file: the evidence Html rendition, verbatim, without text extraction.';
       expect(result.structuredContent).toMatchObject({
         applied: { mode, showOnWebsiteOnly: true },
-        notice: expect.stringContaining('No downloads or text extraction.'),
+        notice: expect.stringContaining(access),
       });
-      expect(text(result)).toContain('No downloads or text extraction.');
+      expect(text(result)).toContain(access);
     },
   );
 
@@ -904,7 +1201,10 @@ describe('ukparl_get_committee', () => {
         ...((await retrieve(input, result)) as object),
         delivery: 'full',
       });
-      expect(reconstruct(payload.items![0]!)).toStrictEqual(raw);
+      // Publication rows omit the committee every row repeats; mode=publication keeps it.
+      expect(reconstruct(payload.items![0]!)).toStrictEqual(
+        mode === 'publications' ? without(raw, 'committee') : raw,
+      );
       expect(requests[0]!.searchParams.has('PublicationType')).toBe(false);
       expect(requests[0]!.searchParams.has('IsInquiry')).toBe(false);
     },
@@ -995,12 +1295,21 @@ describe('ukparl_get_committee', () => {
   });
 
   it.each([
-    ['search', {}, 20],
-    ['members', { committeeId: '11' }, 50],
+    ['search', {}],
+    ['members', { committeeId: '11' }],
+    ['inquiries', {}],
+    ['publications', { committeeId: '11' }],
+    ['evidence', { businessId: '31', evidenceType: 'oral' }],
   ] as const)(
-    'clamps safe oversized %s limits with both-surface notices',
-    async (mode, fields, cap) => {
-      const requests = installCommittees(() => page([{ id: 1 }], 100));
+    'defaults %s to 10, serves the cap of 100 as asked and clamps beyond it on both surfaces',
+    async (mode, fields) => {
+      const requests = installCommittees(() => page([{ id: 1 }], 1000));
+      const defaulted = await runToolContract(ukparlGetCommittee, { mode, ...fields });
+      expect(defaulted.structuredContent).toMatchObject({ applied: { limit: 10 }, cap: 100 });
+      expect(defaulted.structuredContent).not.toHaveProperty('requestedLimit');
+      const atCap = await runToolContract(ukparlGetCommittee, { mode, ...fields, limit: 100 });
+      expect(atCap.structuredContent).toMatchObject({ applied: { limit: 100 }, cap: 100 });
+      expect(text(atCap)).not.toContain('is capped at');
       const result = await runToolContract(ukparlGetCommittee, {
         mode,
         ...fields,
@@ -1009,14 +1318,16 @@ describe('ukparl_get_committee', () => {
       expect(result.isError).not.toBe(true);
       expect(result.structuredContent).toMatchObject({
         requestedLimit: Number.MAX_SAFE_INTEGER,
-        cap,
+        cap: 100,
         shown: 1,
         truncated: true,
-        total: 100,
-        applied: { limit: cap, showOnWebsiteOnly: true },
+        total: 1000,
+        applied: { limit: 100, showOnWebsiteOnly: true },
       });
-      expect(text(result)).toContain(`capped at ${cap}`);
-      expect(requests[0]!.searchParams.get('Take')).toBe(String(cap));
+      expect(text(result)).toContain(
+        `Requested limit ${Number.MAX_SAFE_INTEGER} is capped at 100.`,
+      );
+      expect(requests.map((url) => url.searchParams.get('Take'))).toEqual(['10', '100', '100']);
     },
   );
 
@@ -1074,16 +1385,31 @@ describe('ukparl_get_committee', () => {
     expect(requests).toHaveLength(3);
   });
 
-  it('rejects strict, rebound and oversized-offset collection cursors before I/O', async () => {
+  it('rejects strict, rebound and oversized-offset collection cursors before I/O and resumes one under a new limit', async () => {
     const requests = installCommittees(() => page([{ id: 11 }], 2));
     const first = await runToolContract(ukparlGetCommittee, { query: 'Synthetic', limit: 1 });
     const cursor = ukparlGetCommittee.output.parse(first.structuredContent).page!.nextCursor!;
     const decoded = JSON.parse(Buffer.from(cursor, 'base64url').toString());
     const forged = (change: object) =>
       Buffer.from(JSON.stringify({ ...decoded, ...change })).toString('base64url');
+    const resumed = await runToolContract(ukparlGetCommittee, {
+      query: 'Synthetic',
+      limit: 2,
+      cursor,
+    });
+    expect(resumed.isError).not.toBe(true);
+    expect(resumed.structuredContent).toMatchObject({
+      applied: { limit: 2 },
+      page: { returned: 1, total: 2, hasMore: false },
+    });
+    expect([...requests.at(-1)!.searchParams]).toEqual([
+      ['SearchTerm', 'Synthetic'],
+      ['ShowOnWebsiteOnly', 'true'],
+      ['Skip', '1'],
+      ['Take', '2'],
+    ]);
     for (const input of [
       { query: 'Changed', limit: 1, cursor },
-      { query: 'Synthetic', limit: 2, cursor },
       { cursor: 'malformed!' },
       { query: 'Synthetic', limit: 1, cursor: forged({ extra: 'field' }) },
       { query: 'Synthetic', limit: 1, cursor: forged({ v: 2 }) },
@@ -1093,12 +1419,12 @@ describe('ukparl_get_committee', () => {
       expect(result.structuredContent).toMatchObject({
         error: { data: { reason: 'invalid_cursor' } },
       });
-      expect(text(result)).toContain('same filters and no cursor or contentCursor');
+      expect(text(result)).toContain('unchanged filters and no cursor or contentCursor to restart');
     }
-    expect(requests).toHaveLength(1);
+    expect(requests).toHaveLength(2);
   });
 
-  it('advances whole records by emitted count across byte-limited pages without loss', async () => {
+  it('pages min(limit, cap) whole records whatever their bytes and advances across a limit change', async () => {
     const rows = Array.from({ length: 5 }, (_, index) => ({
       id: 11 + index,
       name: `${index}: ${'文'.repeat(1000)}`,
@@ -1112,25 +1438,69 @@ describe('ukparl_get_committee', () => {
         5,
       ),
     );
+    const whole = await runToolContract(ukparlGetCommittee, { limit: 5 });
+    expect(Buffer.byteLength(JSON.stringify(whole))).toBeGreaterThan(24000);
+    const wholeOutput = ukparlGetCommittee.output.parse(whole.structuredContent);
+    expect(wholeOutput).toMatchObject({
+      delivery: 'full',
+      page: { returned: 5, total: 5, hasMore: false },
+    });
+    expect(wholeOutput.items!.map(reconstruct)).toStrictEqual(rows);
+    assertRendered(wholeOutput, text(whole));
     let cursor: string | undefined;
     const collected: unknown[] = [];
-    do {
+    for (const limit of [2, 3]) {
       const result = await runToolContract(ukparlGetCommittee, {
-        limit: 5,
+        limit,
         ...(cursor ? { cursor } : {}),
       });
       expect(result.isError).not.toBe(true);
-      expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(24000);
       const output = ukparlGetCommittee.output.parse(result.structuredContent);
       expect(output.delivery).toBe('full');
       expect(requests.at(-1)!.searchParams.get('Skip')).toBe(String(collected.length));
-      expect(output.items!.length).toBeGreaterThan(0);
+      expect(output.items).toHaveLength(limit);
       for (const item of output.items!) collected.push(reconstruct(item));
       assertRendered(output, text(result));
       cursor = output.page!.nextCursor;
-    } while (cursor);
+    }
+    expect(cursor).toBeUndefined();
     expect(collected).toStrictEqual(rows);
-    expect(requests.length).toBeGreaterThan(1);
+  });
+
+  it('stops a page before an oversized record, which then leads the next page as an outline', async () => {
+    const huge = { id: 13, name: '文🏛️'.repeat(6000) };
+    const rows = [{ id: 11 }, { id: 12 }, huge, { id: 14 }];
+    const requests = installCommittees((url) =>
+      page(rows.slice(Number(url.searchParams.get('Skip'))), rows.length),
+    );
+    const first = await runToolContract(ukparlGetCommittee, { limit: 4 });
+    expect(first.structuredContent).toMatchObject({ shown: 2, truncated: true });
+    const head = ukparlGetCommittee.output.parse(first.structuredContent);
+    expect(head).toMatchObject({
+      delivery: 'full',
+      page: { returned: 2, total: 4, hasMore: true },
+    });
+    expect(head.items!.map(reconstruct)).toStrictEqual([{ id: 11 }, { id: 12 }]);
+    assertRendered(head, text(first));
+    const input = { limit: 4, cursor: head.page!.nextCursor };
+    const second = await runToolContract(ukparlGetCommittee, input);
+    const outline = ukparlGetCommittee.output.parse(second.structuredContent);
+    expect(outline.collectionPage).toMatchObject({ returned: 1, total: 4, hasMore: true });
+    const reconstructed = ukparlGetCommittee.output.parse({
+      ...((await retrieve(input, second)) as object),
+      delivery: 'full',
+    });
+    expect(reconstructed.items!.map(reconstruct)).toStrictEqual([huge]);
+    const last = await runToolContract(ukparlGetCommittee, {
+      limit: 4,
+      cursor: outline.collectionPage!.nextCursor,
+    });
+    const tail = ukparlGetCommittee.output.parse(last.structuredContent);
+    expect(tail.items!.map(reconstruct)).toStrictEqual([{ id: 14 }]);
+    expect(tail.page).toMatchObject({ returned: 1, hasMore: false });
+    expect(requests.map((url) => url.searchParams.get('Skip'))).toEqual(
+      expect.arrayContaining(['0', '2', '3']),
+    );
   });
 
   it('reconstructs an oversized recursive entity graph and escaped Unicode scalar losslessly', async () => {
@@ -1193,15 +1563,31 @@ describe('ukparl_get_committee', () => {
       contentCursor: cursor,
     });
     expect(rebound.structuredContent).toMatchObject({
-      error: { data: { reason: 'invalid_cursor' } },
+      error: {
+        data: {
+          reason: 'invalid_cursor',
+          recovery: {
+            hint: 'Repeat the same tool with unchanged filters and no cursor or contentCursor to restart.',
+          },
+        },
+      },
     });
-    expect(text(rebound)).toContain('same filters and no cursor or contentCursor');
+    expect(text(rebound)).toContain('unchanged filters and no cursor or contentCursor to restart');
     name = 'Changed'.repeat(5000);
     const changed = await runToolContract(ukparlGetCommittee, { ...input, contentCursor: cursor });
     expect(changed.structuredContent).toMatchObject({
-      error: { data: { reason: 'source_changed' } },
+      error: {
+        data: {
+          reason: 'source_changed',
+          recovery: {
+            hint: 'Repeat the same tool with original filters and any collection cursor, but no contentCursor, then follow the new content cursors.',
+          },
+        },
+      },
     });
-    expect(text(changed)).toContain('original filters and no contentCursor');
+    expect(text(changed)).toContain(
+      'with original filters and any collection cursor, but no contentCursor',
+    );
   });
 
   it('rejects malformed, inherited, noncanonical and wrong-arm content paths on both surfaces', async () => {
@@ -1227,7 +1613,7 @@ describe('ukparl_get_committee', () => {
       expect(result.structuredContent).toMatchObject({
         error: { data: { reason: 'invalid_cursor' } },
       });
-      expect(text(result)).toContain('same filters and no cursor or contentCursor');
+      expect(text(result)).toContain('unchanged filters and no cursor or contentCursor to restart');
     }
   });
 
@@ -1297,6 +1683,7 @@ describe('ukparl_get_committee', () => {
     [403, 'http_forbidden'],
     [409, 'http_conflict'],
     [302, 'http_invalid_request'],
+    [501, 'http_server_error'],
   ] as const)(
     'renders HTTP %s reason and declared recovery on both surfaces',
     async (status, reason) => {
@@ -1334,6 +1721,17 @@ describe('ukparl_get_committee', () => {
     });
     expect(text(result)).toContain('http_rate_limited');
     expect(text(result)).toContain('ukparl_get_committee');
+  });
+
+  it('declares the call deadline with ukparl_get_committee recovery', () => {
+    expect(ukparlGetCommittee.errors).toContainEqual(
+      expect.objectContaining({
+        reason: 'call_deadline_exceeded',
+        code: JsonRpcErrorCode.Timeout,
+        thrownBy: 'service',
+        recovery: expect.stringContaining('ukparl_get_committee'),
+      }),
+    );
   });
 
   it('rejects schema-invalid metadata and malformed JSON without no-match', async () => {

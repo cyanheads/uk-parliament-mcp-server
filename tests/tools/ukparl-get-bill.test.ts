@@ -21,14 +21,7 @@ import {
   stage,
   withFullBillsQueue,
 } from '../services/bills/bills-fixtures.js';
-import { renderedPayload } from './rendered-payload.js';
-
-function text(result: Awaited<ReturnType<typeof runToolContract>>) {
-  return result.content
-    .filter((block) => block.type === 'text')
-    .map((block) => block.text)
-    .join('\n');
-}
+import { renderedPayload, text } from './rendered-payload.js';
 
 /** Assert each source scalar survives the reversible formatter, including every nested line. */
 function expectScalars(rendered: string, value: unknown): void {
@@ -630,8 +623,11 @@ describe('ukparl_get_bill boundaries and recovery', () => {
     });
     expect(renderedPayload(text(empty))).toMatchObject({ page: { hasMore: false } });
     const capped = await runToolContract(ukparlGetBill, { ...selection, limit: 500 });
-    expect(capped.structuredContent).toMatchObject({ applied: { limit: 50 }, requestedLimit: 500 });
-    expect(requests.at(-1)!.searchParams.get('Take')).toBe('50');
+    expect(capped.structuredContent).toMatchObject({
+      applied: { limit: 100 },
+      requestedLimit: 500,
+    });
+    expect(requests.at(-1)!.searchParams.get('Take')).toBe('100');
     expect(
       requests
         .filter((url) => url.pathname.endsWith('/Amendments'))
@@ -788,6 +784,31 @@ describe('ukparl_get_bill boundaries and recovery', () => {
     });
   });
 
+  it('renders an upstream 5xx and declares the call deadline with selected-tool recovery', async () => {
+    installBills(() => new Response('', { status: 501 }));
+    const result = await runToolContract(ukparlGetBill, { billId: '11' });
+    const hint = ukparlGetBill.errors?.find(
+      (entry) => entry.reason === 'http_server_error',
+    )?.recovery;
+    expect(hint).toContain('ukparl_get_bill');
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        data: { reason: 'http_server_error', recovery: { hint } },
+      },
+    });
+    expect(text(result)).toContain('http_server_error');
+    expect(text(result)).toContain(hint);
+    expect(ukparlGetBill.errors).toContainEqual(
+      expect.objectContaining({
+        reason: 'call_deadline_exceeded',
+        code: JsonRpcErrorCode.Timeout,
+        thrownBy: 'service',
+        recovery: expect.stringContaining('ukparl_get_bill'),
+      }),
+    );
+  });
+
   it.each(['stages', 'amendments', 'motions'] as const)(
     'follows every native %s page and retains the final record on both surfaces',
     async (section) => {
@@ -937,11 +958,11 @@ describe('ukparl_get_bill boundaries and recovery', () => {
     },
   );
 
-  it.each([1000, 1001, Number.MAX_SAFE_INTEGER])(
-    'clamps nested read limit %s before workload and preserves licence plus actual count',
+  it.each([101, 1000, Number.MAX_SAFE_INTEGER])(
+    'clamps nested read limit %s to 100 before workload and preserves licence plus actual count',
     async (limit) => {
       const requests = installBills((url) =>
-        url.pathname === '/api/v1/Bills/11' ? bill() : page([stage()], 100),
+        url.pathname === '/api/v1/Bills/11' ? bill() : page([stage()], 1000),
       );
       const result = await runToolContract(ukparlGetBill, {
         billId: '11',
@@ -950,17 +971,75 @@ describe('ukparl_get_bill boundaries and recovery', () => {
       });
       expect(result.isError).not.toBe(true);
       expect(result.structuredContent).toMatchObject({
-        applied: { limit: 50 },
+        applied: { limit: 100 },
         requestedLimit: limit,
         shown: 1,
         truncated: true,
-        cap: 50,
+        cap: 100,
         notice: expect.stringContaining(LICENCE_NOTICE),
       });
-      expect(text(result)).toContain(`Requested limit ${limit} is capped at 50.`);
-      expect(requests[1]?.searchParams.get('Take')).toBe('50');
+      expect(text(result)).toContain(`Requested limit ${limit} is capped at 100.`);
+      expect(requests[1]?.searchParams.get('Take')).toBe('100');
     },
   );
+
+  it.each([
+    ['stages', 500, 100],
+    ['amendments', 500, 100],
+    ['motions', 500, 100],
+    ['publications', 500, 100],
+    ['stages', 100, 100],
+    ['publications', 100, 100],
+    ['stages', undefined, 20],
+    ['publications', undefined, 20],
+  ] as const)(
+    'serves %s limit %s as %s whole records under the 100 ceiling',
+    async (section, limit, effective) => {
+      const rows = Array.from({ length: 150 }, (_, index) =>
+        section === 'stages'
+          ? stage(101 + index)
+          : section === 'amendments'
+            ? amendment(901 + index)
+            : section === 'motions'
+              ? { type: 'Motion', motion: { id: 601 + index, summary: 'A motion' } }
+              : publication(301 + index),
+      );
+      const requests = installBills((url) => {
+        if (url.pathname === '/api/v1/Bills/11') return bill();
+        if (section === 'publications') return { billId: 11, publications: rows };
+        const skip = Number(url.searchParams.get('Skip'));
+        return page(rows.slice(skip, skip + Number(url.searchParams.get('Take'))), rows.length);
+      });
+      const result = await runToolContract(ukparlGetBill, {
+        billId: '11',
+        section,
+        ...(section === 'amendments' || section === 'motions' ? { billStageId: '101' } : {}),
+        ...(limit === undefined ? {} : { limit }),
+      });
+      const output = ukparlGetBill.output.parse(result.structuredContent);
+      expect(output.delivery).toBe('full');
+      expect(output.items).toHaveLength(effective);
+      expect(output.page).toMatchObject({ returned: effective, total: 150, hasMore: true });
+      expect(result.structuredContent).toMatchObject({
+        applied: { limit: effective },
+        truncated: true,
+        shown: effective,
+        cap: 100,
+      });
+      if (section !== 'publications')
+        expect(requests.at(-1)!.searchParams.get('Take')).toBe(String(effective));
+      if (limit !== undefined && limit > effective) {
+        expect(result.structuredContent).toMatchObject({ requestedLimit: limit });
+        expect(text(result)).toContain(`Requested limit ${limit} is capped at 100.`);
+      } else expect(result.structuredContent).not.toHaveProperty('requestedLimit');
+    },
+  );
+
+  it('documents the 100 collection page-size ceiling', () => {
+    expect(ukparlGetBill.enrichment?.cap.description).toMatch(/ceiling/i);
+    expect(ukparlGetBill.enrichment?.cap.description).not.toMatch(/effective/i);
+    expect(ukparlGetBill.input.shape.limit.description).toMatch(/default 20, cap 100/);
+  });
 
   it('rejects filter-bound collection cursors before network', async () => {
     const requests = installBills((url) =>
@@ -998,51 +1077,61 @@ describe('ukparl_get_bill boundaries and recovery', () => {
 });
 
 describe('ukparl_get_bill oversized source content', () => {
-  it('pages large whole stages by actual emitted rows and measures the complete composed response', async () => {
-    const rows = Array.from({ length: 5 }, (_, index) => ({
-      ...stage(index + 101),
-      description: `Stage ${index}: ${'文'.repeat(1400)}`,
-    }));
-    const requests = installBills((url) =>
-      url.pathname === '/api/v1/Bills/11'
-        ? bill()
-        : page(
-            rows.slice(
-              Number(url.searchParams.get('Skip')),
-              Number(url.searchParams.get('Skip')) + Number(url.searchParams.get('Take')),
+  it.each([
+    [2, [2, 2, 1]],
+    [5, [5]],
+  ])(
+    'pages limit %s large whole stages past 24,000 reply bytes by actual emitted rows',
+    async (limit, sizes) => {
+      const rows = Array.from({ length: 5 }, (_, index) => ({
+        ...stage(index + 101),
+        description: `Stage ${index}: ${'文'.repeat(1400)}`,
+      }));
+      const requests = installBills((url) =>
+        url.pathname === '/api/v1/Bills/11'
+          ? bill()
+          : page(
+              rows.slice(
+                Number(url.searchParams.get('Skip')),
+                Number(url.searchParams.get('Skip')) + Number(url.searchParams.get('Take')),
+              ),
+              5,
             ),
-            5,
-          ),
-    );
-    const ids: string[] = [];
-    let cursor: string | undefined;
-    do {
-      const result = await runToolContract(ukparlGetBill, {
-        billId: '11',
-        section: 'stages',
-        limit: 5,
-        ...(cursor ? { cursor } : {}),
-      });
-      expect(result.isError).not.toBe(true);
-      expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(24000);
-      const output = ukparlGetBill.output.parse(result.structuredContent);
-      expect(requests.at(-1)?.searchParams.get('Skip')).toBe(String(ids.length));
-      expect(output.delivery).toBe('full');
-      expect(output.items!.length).toBeGreaterThan(0);
-      expect(output.items!.length).toBeLessThan(5);
-      for (const item of output.items!) {
-        expect(item).toMatchObject({ stageSittings: [{ id: '201' }, { id: '202' }] });
-        expect(text(result)).toContain(JSON.stringify(Reflect.get(item, 'description')));
-        ids.push(String(Reflect.get(item, 'id')));
-      }
-      expect(result.structuredContent).toMatchObject({
-        ...(output.page!.hasMore ? { truncated: true, shown: output.items!.length, cap: 5 } : {}),
-        notice: expect.stringContaining(LICENCE_NOTICE),
-      });
-      cursor = output.page!.nextCursor;
-    } while (cursor);
-    expect(ids).toEqual(['101', '102', '103', '104', '105']);
-  });
+      );
+      const ids: string[] = [];
+      const pages: number[] = [];
+      let cursor: string | undefined;
+      do {
+        const result = await runToolContract(ukparlGetBill, {
+          billId: '11',
+          section: 'stages',
+          limit,
+          ...(cursor ? { cursor } : {}),
+        });
+        expect(result.isError).not.toBe(true);
+        const output = ukparlGetBill.output.parse(result.structuredContent);
+        expect(requests.at(-1)?.searchParams.get('Skip')).toBe(String(ids.length));
+        expect(output.delivery).toBe('full');
+        pages.push(output.items!.length);
+        for (const item of output.items!) {
+          expect(item).toMatchObject({ stageSittings: [{ id: '201' }, { id: '202' }] });
+          expect(text(result)).toContain(JSON.stringify(Reflect.get(item, 'description')));
+          ids.push(String(Reflect.get(item, 'id')));
+        }
+        if (output.items!.length === 5)
+          expect(Buffer.byteLength(JSON.stringify(result))).toBeGreaterThan(24_000);
+        expect(result.structuredContent).toMatchObject({
+          ...(output.page!.hasMore
+            ? { truncated: true, shown: output.items!.length, cap: 100 }
+            : {}),
+          notice: expect.stringContaining(LICENCE_NOTICE),
+        });
+        cursor = output.page!.nextCursor;
+      } while (cursor);
+      expect(pages).toEqual(sizes);
+      expect(ids).toEqual(['101', '102', '103', '104', '105']);
+    },
+  );
 
   it('outlines only the oversized first stage, reconstructs it whole and resumes the next collection item', async () => {
     const description = 'Large indivisible synthetic stage Ω 🏛️\n'.repeat(900);
@@ -1068,7 +1157,7 @@ describe('ukparl_get_bill oversized source content', () => {
     expect(result.structuredContent).toMatchObject({
       shown: 1,
       truncated: true,
-      cap: 2,
+      cap: 100,
       notice: expect.stringContaining(LICENCE_NOTICE),
     });
     const reconstructed = await reconstruct(selection, output);
@@ -1141,6 +1230,8 @@ describe('ukparl_get_bill oversized source content', () => {
     expect(changed.structuredContent).toMatchObject({
       error: { code: JsonRpcErrorCode.Conflict, data: { reason: 'source_changed' } },
     });
-    expect(text(changed)).toContain('original filters and no contentCursor');
+    expect(text(changed)).toContain(
+      'original filters and any collection cursor, but no contentCursor',
+    );
   });
 });

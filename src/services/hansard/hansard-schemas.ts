@@ -3,8 +3,9 @@
  * @module services/hansard/hansard-schemas
  */
 import { z } from '@cyanheads/mcp-ts-core';
-import { SourceSchema } from '../parliament-http/parliament-models.js';
 
+/** Official Spoken sitting-date ordering; omission keeps the source default, newest sitting first. */
+export const HansardSortOrderSchema = z.enum(['SittingDateAsc', 'SittingDateDesc']);
 /** Coverage facts do not establish an API lower bound or continuous completeness. */
 export const HANSARD_COVERAGE = {
   source: 'spoken_api' as const,
@@ -158,7 +159,13 @@ export const HansardItemSchema = z.object({
     .nullable()
     .optional()
     .describe('Source debate section order.'),
-  rank: z.number().nullable().optional().describe('Source search rank, not a synthesized score.'),
+  rank: z
+    .number()
+    .nullable()
+    .optional()
+    .describe(
+      'Source search rank, not a synthesized score; results follow sitting date, not rank, and rank is 0 without search text.',
+    ),
   contributionUrl: z
     .string()
     .describe(
@@ -170,5 +177,4 @@ export const HansardItemSchema = z.object({
     .describe(
       'Official debate permalink resolver when its external ID is supplied; returns the website path as JSON, resolved against https://hansard.parliament.uk.',
     ),
-  source: SourceSchema.describe('Actual request provenance and licence.'),
 });

@@ -48,6 +48,7 @@ export interface GetBillInput {
   cursor?: string | undefined;
   decision?: z.infer<typeof AmendmentDecisionSchema> | undefined;
   itemId?: string | undefined;
+  /** Effective collection page size, already clamped by the tool; collection sections only, default 20. */
   limit?: number | undefined;
   memberId?: string | undefined;
   section: z.infer<typeof BillSectionSchema>;
@@ -169,7 +170,6 @@ export class BillsService {
     const rows = (response.data.items ?? []).slice(0, limit).map((item) =>
       BillHitSchema.parse({
         ...Bills.bill.parse(normalizeBillValue(item)),
-        source: response.source,
         detailLevel: 'summary',
       }),
     );
@@ -179,6 +179,7 @@ export class BillsService {
       );
     const repage = (count: number) => ({
       ...(input.query ? { query: input.query } : {}),
+      source: response.source,
       items: rows.slice(0, count),
       page: pageFor(cursor, count, response.data.totalResults),
     });
@@ -216,7 +217,7 @@ export class BillsService {
         );
     if (conflicts.length)
       throw invalidParams(conflicts.join(' '), { reason: 'invalid_mode_arguments' });
-    const limit = Math.min(input.limit ?? 20, 50);
+    const limit = input.limit ?? 20;
     const filters = {
       billId: input.billId,
       section,

@@ -13,8 +13,21 @@ import { contribution, installHansard, spoken } from './hansard-fixtures.js';
 
 afterEach(disposeParliamentHttp);
 describe('HansardService', () => {
+  it.each([
+    ['SittingDateAsc', 'SittingDateAsc'],
+    ['SittingDateDesc', 'SittingDateDesc'],
+    [undefined, null],
+  ] as const)('maps sortOrder %s to queryParameters.orderBy %s', async (sortOrder, orderBy) => {
+    const requests = installHansard(() => spoken([contribution()]));
+    const http = getParliamentHttp();
+    using call = http.beginCall(createMockContext());
+    await new HansardService(http).search({ limit: 5, query: 'synthetic', sortOrder }, call);
+    expect(requests[0]!.searchParams.get('queryParameters.orderBy')).toBe(orderBy);
+    expect(requests[0]!.searchParams.get('queryParameters.searchTerm')).toBe('synthetic');
+  });
+
   it('preserves complete text, metadata, int64 IDs, procedural nulls and historical external IDs', async () => {
-    installHansard(() =>
+    const requests = installHansard(() =>
       spoken([
         {
           ...contribution(),
@@ -63,11 +76,13 @@ describe('HansardService', () => {
     expect(sparse.memberId).toBeUndefined();
     expect(sparse.debateUrl).toBeUndefined();
     expect(result.payload).toMatchObject({
+      source: { api: 'hansard', url: requests[0]!.href },
       spokenResultCount: 0,
       writtenResultCount: 2,
       correctionsResultCount: 3,
       divisionsResultCount: 4,
     });
+    for (const item of result.payload.items) expect(item).not.toHaveProperty('source');
   });
 
   it.each([null, '', undefined])(

@@ -26,6 +26,30 @@ const PARLIAMENT_ORIGINS = {
   committees: 'https://committees-api.parliament.uk',
 } as const satisfies Record<Api, string>;
 
+/** One budget per tool call: every queue wait, attempt, body read and backoff fits inside it. */
+const CALL_DEADLINE_MS = 45_000;
+const CALL_DEADLINE_MESSAGE = `Parliament call exceeded its ${CALL_DEADLINE_MS} ms deadline.`;
+const MAX_RETRIES = 2;
+const BASE_DELAY_MS = 1000;
+const MAX_DELAY_MS = 8000;
+const JITTER = 0.25;
+const RETRYABLE_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
+const HTTP_REASONS = new Map([
+  [JsonRpcErrorCode.InvalidParams, 'http_invalid_params'],
+  [JsonRpcErrorCode.Unauthorized, 'http_unauthorized'],
+  [JsonRpcErrorCode.Forbidden, 'http_forbidden'],
+  [JsonRpcErrorCode.Conflict, 'http_conflict'],
+  [JsonRpcErrorCode.RateLimited, 'http_rate_limited'],
+  [JsonRpcErrorCode.InvalidRequest, 'http_invalid_request'],
+]);
+
+function callDeadlineExceeded(): McpError {
+  return timeout(CALL_DEADLINE_MESSAGE, { reason: 'call_deadline_exceeded' });
+}
+function httpStatus(error: McpError): unknown {
+  return error.data?.status ?? error.data?.statusCode;
+}
+
 /** Injectable clock; fake timers can own all service deadlines and queue waits. */
 export interface ParliamentClock {
   clearTimeout(timer: ReturnType<typeof setTimeout>): void;
@@ -48,6 +72,12 @@ export type ParliamentExchange = (
 export interface ParliamentCall extends Disposable {
   readonly context: Context;
   readonly deadlineAt: number;
+  /**
+   * The same lifetime as `signal` for network I/O, except the deadline arrives as a `TimeoutError`, so the
+   * fetch layer records the server's own cut-off as a timeout instead of a caller abort.
+   */
+  readonly exchangeSignal: AbortSignal;
+  /** Ends on caller cancellation, shutdown, or the deadline (reason: the `call_deadline_exceeded` error). */
   readonly signal: AbortSignal;
 }
 interface Waiter {
@@ -99,21 +129,19 @@ export class ParliamentHttpService {
   beginCall(context: Context): ParliamentCall {
     if (this.disposed) throw serviceUnavailable('Parliament transport has shut down.');
     const controller = new AbortController();
-    const deadlineAt = this.clock.now() + 45_000;
-    const timer = this.clock.setTimeout(
-      () =>
-        controller.abort(
-          timeout('Parliament call exceeded its 45000 ms deadline.', {
-            reason: 'call_deadline_exceeded',
-          }),
-        ),
-      45_000,
-    );
+    const expiry = new AbortController();
+    const deadlineAt = this.clock.now() + CALL_DEADLINE_MS;
+    const timer = this.clock.setTimeout(() => {
+      // Expiry first, so the exchange signal carries the TimeoutError rather than the error below.
+      expiry.abort(new DOMException(CALL_DEADLINE_MESSAGE, 'TimeoutError'));
+      controller.abort(callDeadlineExceeded());
+    }, CALL_DEADLINE_MS);
     const signal = AbortSignal.any([context.signal, controller.signal]);
     this.calls.add(controller);
     return {
       context,
       signal,
+      exchangeSignal: AbortSignal.any([expiry.signal, signal]),
       deadlineAt,
       [Symbol.dispose]: () => {
         this.clock.clearTimeout(timer);
@@ -190,30 +218,46 @@ export class ParliamentHttpService {
     return Math.max(
       0,
       Math.min(
-        8000,
+        MAX_DELAY_MS,
         Number.isFinite(numeric) ? numeric * 1000 : Date.parse(value) - this.clock.now() || 1000,
       ),
     );
   }
   private transient(error: unknown): boolean {
     if (!(error instanceof McpError) || error.data?.retryable === false) return false;
-    const status = error.data?.status ?? error.data?.statusCode;
-    if (typeof status === 'number') return [408, 429, 500, 502, 503, 504].includes(status);
-    return (
-      error.code === JsonRpcErrorCode.Timeout || error.code === JsonRpcErrorCode.ServiceUnavailable
-    );
+    const status = httpStatus(error);
+    if (typeof status === 'number') return RETRYABLE_STATUSES.has(status);
+    // Without a status only a network failure or HTML error page retries; a timeout here is the spent call budget.
+    return error.code === JsonRpcErrorCode.ServiceUnavailable;
+  }
+  /**
+   * Another attempt runs only while the budget left after the longest possible wait still covers one as
+   * long as the attempt that just failed: a fast 503 retries, a failure that took most of the budget surfaces.
+   */
+  private retryFits(
+    call: ParliamentCall,
+    queue: OriginQueue,
+    attempts: number,
+    startedAt: number,
+  ): boolean {
+    const now = this.clock.now();
+    const backoffCeilingMs =
+      Math.min(BASE_DELAY_MS * 2 ** (attempts - 1), MAX_DELAY_MS) * (1 + JITTER);
+    const waitMs = Math.max(backoffCeilingMs, queue.cooldownUntil - now);
+    return call.deadlineAt - now - waitMs >= now - startedAt;
   }
 
   private httpFailure(error: McpError): McpError {
-    const reasons = new Map([
-      [JsonRpcErrorCode.InvalidParams, 'http_invalid_params'],
-      [JsonRpcErrorCode.Unauthorized, 'http_unauthorized'],
-      [JsonRpcErrorCode.Forbidden, 'http_forbidden'],
-      [JsonRpcErrorCode.Conflict, 'http_conflict'],
-      [JsonRpcErrorCode.RateLimited, 'http_rate_limited'],
-      [JsonRpcErrorCode.InvalidRequest, 'http_invalid_request'],
-    ]);
-    const reason = reasons.get(error.code);
+    const status = httpStatus(error);
+    // Every upstream 5xx shares one reason and code; a 501 keeps the framework's retryable: false.
+    if (typeof status === 'number' && status >= 500)
+      return new McpError(
+        JsonRpcErrorCode.ServiceUnavailable,
+        error.message,
+        { ...error.data, reason: 'http_server_error' },
+        { cause: error },
+      );
+    const reason = HTTP_REASONS.get(error.code);
     if (!reason) return error;
     return new McpError(
       error.code,
@@ -308,24 +352,26 @@ export class ParliamentHttpService {
   ): Promise<ParliamentResponse<z.output<TSchema>>> {
     const url = this.url(api, path, query, allowedKeys);
     const queue = this.queue(api);
+    const signal = call.exchangeSignal;
+    // The latest attempt's number and start, which the retry predicate weighs against the remaining budget.
+    let attempts = 0;
+    let startedAt = 0;
     const data = await withRetry(
-      async (attempt) => {
+      async () => {
         call.signal.throwIfAborted();
-        await this.acquire(queue, attempt.signal);
-        const attemptMs = Math.max(0, Math.min(12_000, call.deadlineAt - this.clock.now()));
-        const controller = new AbortController();
-        const timer = this.clock.setTimeout(
-          () =>
-            controller.abort(
-              timeout('Parliament attempt timed out.', { reason: 'attempt_timeout' }),
-            ),
-          attemptMs,
-        );
-        const signal = AbortSignal.any([attempt.signal, controller.signal]);
+        await this.acquire(queue, call.signal);
+        attempts++;
+        startedAt = this.clock.now();
         let responseRead = false;
         try {
           signal.throwIfAborted();
-          const response = await this.exchangeResponse(url, attemptMs, call.context, signal);
+          // No per-attempt cap: an attempt may use everything left of the call budget.
+          const response = await this.exchangeResponse(
+            url,
+            Math.max(0, call.deadlineAt - startedAt),
+            call.context,
+            signal,
+          );
           if (!response.ok)
             throw this.httpFailure(
               await httpErrorFromResponse(response, {
@@ -358,8 +404,10 @@ export class ParliamentHttpService {
         } catch (error) {
           call.context.signal.throwIfAborted();
           call.signal.throwIfAborted();
-          if (controller.signal.aborted) throw controller.signal.reason;
-          if (error instanceof McpError && (error.data?.status ?? error.data?.statusCode) === 429) {
+          // The exchange's own timeout is the remaining call budget, and may fire just before the call timer.
+          if (error instanceof McpError && error.data?.errorSource === 'FetchTimeout')
+            throw callDeadlineExceeded();
+          if (error instanceof McpError && httpStatus(error) === 429) {
             const delayMs = this.retryAfterMs(error.data?.retryAfter);
             queue.cooldownUntil = Math.max(queue.cooldownUntil, this.clock.now() + delayMs);
             throw new McpError(
@@ -375,7 +423,6 @@ export class ParliamentHttpService {
             });
           throw error;
         } finally {
-          this.clock.clearTimeout(timer);
           queue.active--;
           this.dispatch(queue);
         }
@@ -384,11 +431,14 @@ export class ParliamentHttpService {
         signal: call.signal,
         context: call.context,
         operation: `parliament.${api}`,
-        maxRetries: 2,
-        baseDelayMs: 1000,
-        jitter: 0.25,
-        maxDelayMs: 8000,
-        isTransient: (error) => this.transient(error),
+        maxRetries: MAX_RETRIES,
+        baseDelayMs: BASE_DELAY_MS,
+        jitter: JITTER,
+        maxDelayMs: MAX_DELAY_MS,
+        // The last attempt skips the budget check, so an exhausted ladder still reports its attempt count.
+        isTransient: (error) =>
+          this.transient(error) &&
+          (attempts > MAX_RETRIES || this.retryFits(call, queue, attempts, startedAt)),
       },
     );
     call.context.signal.throwIfAborted();

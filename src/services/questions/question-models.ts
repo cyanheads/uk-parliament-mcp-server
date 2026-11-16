@@ -3,18 +3,19 @@
  * @module services/questions/question-models
  */
 import { z } from '@cyanheads/mcp-ts-core';
-import { SourceSchema } from '../parliament-http/parliament-models.js';
 
-const MemberSchema = z.object({
-  id: z.number().int().positive().optional().describe('Members API identifier.'),
-  listAs: z.string().nullish().describe('Source sorting name.'),
-  name: z.string().nullish().describe('Member display name.'),
-  party: z.string().nullish().describe('Recorded party name.'),
-  partyColour: z.string().nullish().describe('Recorded party colour.'),
-  partyAbbreviation: z.string().nullish().describe('Recorded party abbreviation.'),
-  memberFrom: z.string().nullish().describe('Constituency or member origin.'),
-  thumbnailUrl: z.string().nullish().describe('Published member thumbnail link.'),
-});
+const MemberSchema = z
+  .object({
+    id: z.number().int().positive().optional().describe('Members API identifier.'),
+    listAs: z.string().nullish().describe('Source sorting name.'),
+    name: z.string().nullish().describe('Member display name.'),
+    party: z.string().nullish().describe('Recorded party name.'),
+    partyColour: z.string().nullish().describe('Recorded party colour.'),
+    partyAbbreviation: z.string().nullish().describe('Recorded party abbreviation.'),
+    memberFrom: z.string().nullish().describe('Constituency or member origin.'),
+    thumbnailUrl: z.string().nullish().describe('Published member thumbnail link.'),
+  })
+  .meta({ id: 'QuestionMember' });
 const AttachmentSchema = z.object({
   url: z.string().nullish().describe('Published attachment link; not downloaded.'),
   title: z.string().nullish().describe('Attachment title.'),
@@ -105,14 +106,16 @@ export const QuestionSearchSchema = z.object({
   totalResults: z.number().int().nonnegative(),
   results: z.array(QuestionItemSchema),
 });
-/** Public flattened question record avoids redundant wrapper nesting. */
+/**
+ * Public flattened question record; request provenance lives on the payload `source`.
+ * `record` and `items[]` reference its single `$defs` entry.
+ */
 export const QuestionRecordSchema = QuestionSchema.extend({
   questionId: z.string().describe('Decimal Questions API ID for detail mode.'),
   links: z
     .array(QuestionLinkSchema.describe('Source relationship link.'))
     .nullish()
     .describe('Source relationship links.'),
-  source: SourceSchema.describe('Actual selected request provenance.'),
   detailLevel: z
     .enum(['summary', 'complete'])
     .describe('Summary previews or complete selected question.'),
@@ -120,4 +123,4 @@ export const QuestionRecordSchema = QuestionSchema.extend({
     .string()
     .optional()
     .describe('Same-tool instruction for complete question and answer retrieval.'),
-});
+}).meta({ id: 'QuestionRecord' });

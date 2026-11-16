@@ -2,8 +2,7 @@
  * @fileoverview Written-question search and detail without search-hit hydration.
  * @module services/questions/questions-service
  */
-import { invalidParams } from '@cyanheads/mcp-ts-core/errors';
-import { getMembers } from '../members/members-service.js';
+import { assertKnownAnsweringBodies } from '../parliament-http/answering-body-filter.js';
 import {
   getParliamentHttp,
   type ParliamentCall,
@@ -35,15 +34,8 @@ export class QuestionsService {
 
   /** Validate against the complete Members answering-body reference before searching. */
   async search(call: ParliamentCall, input: QuestionsSearch, offset: number, take: number) {
-    if (input.answeringBodyIds?.length) {
-      const reference = await getMembers().answeringBodies(call);
-      const known = new Set(reference.data.map((body) => String(body.id)));
-      if (input.answeringBodyIds.some((id) => !known.has(id)))
-        throw invalidParams(
-          'An answering-body ID is absent from the complete official reference.',
-          { reason: 'unknown_reference_id' },
-        );
-    }
+    if (input.answeringBodyIds?.length)
+      await assertKnownAnsweringBodies(call, input.answeringBodyIds);
     return this.http.get(
       call,
       'questions',

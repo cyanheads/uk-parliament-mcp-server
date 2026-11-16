@@ -1,7 +1,7 @@
 {
   "name": "uk-parliament-mcp-server",
   "version": "0.1.2",
-  "description": "Search UK Parliament bills, members, votes, Hansard, written questions, and committees via MCP. STDIO or Streamable HTTP.",
+  "description": "Search UK Parliament bills, members, votes, Hansard, written questions, ministerial statements, and committees via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "cyanheads",
     "email": "casey@caseyjhand.com",
@@ -10,12 +10,12 @@
   "homepage": "https://github.com/cyanheads/uk-parliament-mcp-server#readme",
   "repository": "https://github.com/cyanheads/uk-parliament-mcp-server",
   "license": "Apache-2.0",
-  "keywords": ["mcp", "mcp-server", "model-context-protocol", "ai-agents", "ai-tools", "typescript", "bun", "stdio", "streamable-http", "cyanheads", "uk-parliament", "hansard", "legislation", "politics", "westminster", "written-questions", "committees", "parliamentary-votes"],
+  "keywords": ["mcp", "mcp-server", "model-context-protocol", "ai-agents", "ai-tools", "typescript", "bun", "stdio", "streamable-http", "cyanheads", "uk-parliament", "hansard", "legislation", "politics", "westminster", "written-questions", "ministerial-statements", "committees", "parliamentary-votes"],
   "mcpServers": "./.codex-plugin/mcp.json",
   "interface": {
     "displayName": "uk-parliament-mcp-server",
-    "shortDescription": "Search UK Parliament bills, members, votes, Hansard, written questions, and committees via MCP. STDIO or Streamable HTTP.",
-    "longDescription": "Follow business in the UK Parliament through bills, member profiles, division records, Hansard contributions, written questions and answers, and committee work. Search official records and retrieve details with source links through keyless Parliamentary APIs.",
+    "shortDescription": "Search UK Parliament bills, members, votes, Hansard, written questions, ministerial statements, and committees via MCP. STDIO or Streamable HTTP.",
+    "longDescription": "Follow business in the UK Parliament through bills, member profiles, division records, Hansard contributions, written questions and answers, written ministerial statements, and committee work. Search official records and retrieve details with source links through keyless Parliamentary APIs.",
     "developerName": "cyanheads",
     "category": "research",
     "capabilities": ["Read"],

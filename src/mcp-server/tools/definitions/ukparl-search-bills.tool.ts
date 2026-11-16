@@ -20,12 +20,15 @@ import {
   LimitSchema,
   optionalText,
   PageSchema,
+  SourceSchema,
 } from '@/services/parliament-http/parliament-models.js';
+
+const LIMIT_CAP = 100;
 
 /** Discover bills; summaries expose IDs for selected complete scrutiny records. */
 export const ukparlSearchBills = tool('ukparl_search_bills', {
   description:
-    'Search Westminster bill summaries by title, current or originating House, session, sponsoring member, department, reference stage, bill type or status, with optional official ordering. Use ukparl_lookup_reference for stage/type/department IDs and ukparl_get_bill for complete selected records. Department IDs are distinct from answering-body IDs. inAmendableStage=true restricts to amendable stages; false is unrestricted. No session or date scope is inferred. Follow collection cursors with the same filters; use contentCursor to reconstruct an oversized item.',
+    'Search Westminster bill summaries by title, current or originating House, session, sponsoring member, department, reference stage, bill type or status, with optional official ordering. Use ukparl_lookup_reference for stage/type/department IDs and ukparl_get_bill for complete selected records. Department IDs are distinct from answering-body IDs. inAmendableStage=true restricts to amendable stages; false equals omission. No session or date scope is inferred. Follow collection cursors with the same filters; use contentCursor to reconstruct an oversized item.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     departmentId: optionalText(IdSchema).describe(
@@ -40,7 +43,7 @@ export const ukparlSearchBills = tool('ukparl_search_bills', {
     isDefeated: optionalText(z.boolean()).describe('Filter by defeated state, including false.'),
     isWithdrawn: optionalText(z.boolean()).describe('Filter by withdrawn state, including false.'),
     inAmendableStage: optionalText(z.boolean()).describe(
-      'True restricts to amendable stages; false applies no restriction.',
+      'True restricts to amendable stages; false equals omission and is not echoed in applied.',
     ),
     query: optionalText(z.string().trim().min(1)).describe('Bill title search text.'),
     house: optionalText(HouseSchema).describe('Current Commons or Lords House.'),
@@ -60,7 +63,7 @@ export const ukparlSearchBills = tool('ukparl_search_bills', {
       'Opaque collection continuation; preserve filters.',
     ),
     limit: LimitSchema.describe(
-      'Requested bills; positive safe integer, default 10, effective cap 20.',
+      `Requested bills; positive safe integer, default 10, cap ${LIMIT_CAP}; larger values are capped with a notice.`,
     ),
     contentCursor: optionalText(z.string().min(1)).describe(
       'Opaque same-selection lossless content continuation.',
@@ -72,6 +75,9 @@ export const ukparlSearchBills = tool('ukparl_search_bills', {
       .string()
       .optional()
       .describe('Complete normalized query text, also reconstructed through content continuation.'),
+    source: SourceSchema.optional().describe(
+      'Exact official Bills search request provenance, including empty pages.',
+    ),
     items: z
       .array(BillHitSchema)
       .optional()
@@ -98,7 +104,7 @@ export const ukparlSearchBills = tool('ukparl_search_bills', {
         inAmendableStage: z
           .boolean()
           .optional()
-          .describe('Supplied amendable-stage selection; false is unrestricted.'),
+          .describe('Applied amendable-stage restriction; present only when true.'),
         source: z.literal('bills').describe('Official Bills API.'),
         limit: z.number().int().describe('Effective bill limit.'),
       })
@@ -115,7 +121,11 @@ export const ukparlSearchBills = tool('ukparl_search_bills', {
       .int()
       .optional()
       .describe('Actual whole records emitted or selected for lossless reconstruction.'),
-    cap: z.number().int().optional().describe('Effective per-call collection limit.'),
+    cap: z
+      .number()
+      .int()
+      .optional()
+      .describe('Search page-size ceiling; a larger limit is clamped to it.'),
   },
   enrichmentTrailer: {
     applied: { render: enrichmentField('applied') },
@@ -194,7 +204,7 @@ export const ukparlSearchBills = tool('ukparl_search_bills', {
       code: JsonRpcErrorCode.Conflict,
       when: 'The selected payload changed during content retrieval.',
       recovery:
-        'Repeat the same tool with its original filters and no contentCursor, then follow the new content cursors.',
+        'Repeat the same tool with its original filters and any collection cursor, but no contentCursor, then follow the new content cursors.',
       thrownBy: 'service',
     },
     {
@@ -212,11 +222,35 @@ export const ukparlSearchBills = tool('ukparl_search_bills', {
       recovery: 'Wait briefly, then repeat ukparl_search_bills with the same filters.',
       thrownBy: 'service',
     },
+    {
+      reason: 'call_deadline_exceeded',
+      code: JsonRpcErrorCode.Timeout,
+      when: 'The 45-second call deadline elapsed before the official API answered.',
+      recovery:
+        'Repeat ukparl_search_bills once after a short wait; if it times out again, add a sessionId, house or more specific query, or lower limit.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'http_server_error',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'The official API returned an HTTP 5xx server error.',
+      recovery:
+        'Repeat ukparl_search_bills with a sessionId, house or more specific query, or a lower limit; retry later if the narrower search also fails.',
+      thrownBy: 'service',
+    },
   ],
   async handler(input, ctx) {
     using call = getParliamentHttp().beginCall(ctx);
-    const limit = Math.min(input.limit, 20);
-    const { cursor: _cursor, contentCursor: _contentCursor, limit: _limit, ...filters } = input;
+    const limit = Math.min(input.limit, LIMIT_CAP);
+    const {
+      cursor: _cursor,
+      contentCursor: _contentCursor,
+      limit: _limit,
+      inAmendableStage,
+      ...rest
+    } = input;
+    // The source ignores IsInAmendableStage=false, so false selects exactly what omission does.
+    const filters = { ...rest, ...(inAmendableStage ? { inAmendableStage } : {}) };
     const { query: _query, ...shortFilters } = filters;
     const applied = {
       ...shortFilters,
@@ -235,9 +269,8 @@ export const ukparlSearchBills = tool('ukparl_search_bills', {
       contentCursor: input.contentCursor,
       collection: { count: result.count, repage: result.repage },
       retained: (payload) => ({
-        ...(payload.items[0]
-          ? { source: payload.items[0].source, identity: { billId: payload.items[0].billId } }
-          : {}),
+        source: payload.source,
+        ...(payload.items[0] ? { identity: { billId: payload.items[0].billId } } : {}),
         page: payload.page,
       }),
       enrichmentFor: (selected) => ({
@@ -246,7 +279,7 @@ export const ukparlSearchBills = tool('ukparl_search_bills', {
         totalCount: selected.page.total,
         ...(input.limit > limit ? { requestedLimit: input.limit } : {}),
         ...(selected.page.hasMore
-          ? { truncated: true, shown: selected.page.returned, cap: limit }
+          ? { truncated: true, shown: selected.page.returned, cap: LIMIT_CAP }
           : {}),
       }),
       applyEnrichment: (values) => ctx.enrich(values),

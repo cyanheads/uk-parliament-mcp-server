@@ -23,16 +23,38 @@ import {
   page,
   question,
 } from '../services/questions/questions-fixtures.js';
-import { renderedPayload } from './rendered-payload.js';
+import { renderedPayload, text } from './rendered-payload.js';
 
-function text(result: Awaited<ReturnType<typeof runToolContract>>) {
-  return result.content
-    .filter((block) => block.type === 'text')
-    .map((block) => block.text)
-    .join('\n');
-}
 async function run(input: Record<string, unknown> = {}) {
   return runToolContract(ukparlSearchQuestions, input);
+}
+/** Rebuild the value behind one content cursor through actual bounded replies to `input`. */
+async function reconstruct(input: Record<string, unknown>, cursor: string): Promise<unknown> {
+  let next: string | undefined = cursor;
+  const fragments: string[] = [];
+  const children: [string, unknown][] = [];
+  let kind = '';
+  do {
+    const result = await run({ ...input, contentCursor: next });
+    expect(result.isError).not.toBe(true);
+    expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(24000);
+    const output = ukparlSearchQuestions.output.parse(result.structuredContent);
+    const content = output.contentPage!;
+    kind = content.kind;
+    expect(text(result)).toContain('ukparl_search_questions');
+    if (content.fragment !== undefined) {
+      fragments.push(content.fragment);
+      expect(text(result)).toContain(JSON.stringify(content.fragment));
+    }
+    for (const entry of content.entries ?? [])
+      children.push([entry.path.split('/').at(-1)!, await reconstruct(input, entry.contentCursor)]);
+    next = content.nextCursor;
+  } while (next);
+  return fragments.length
+    ? JSON.parse(fragments.join(''))
+    : kind === 'array'
+      ? children.map(([, value]) => value)
+      : Object.fromEntries(children);
 }
 afterEach(() => {
   disposeQuestions();
@@ -135,7 +157,7 @@ describe('ukparl_search_questions', () => {
       filters: selection,
       items: [],
       page: { total: 0, returned: 0, hasMore: false },
-      cap: 20,
+      cap: 100,
     });
     expect(text(first)).toContain('No questions matched');
     const cursor = advanceCollectionCursor(
@@ -250,6 +272,10 @@ describe('ukparl_search_questions', () => {
       },
     });
     expect(requests).toHaveLength(1);
+    // Provenance is carried once by the payload, never repeated on each preview.
+    expect(result.structuredContent).toMatchObject({ source: { url: requests[0]!.href } });
+    expect(Reflect.get(result.structuredContent!, 'items')[0]).not.toHaveProperty('source');
+    expect((renderedPayload(text(result)).items as object[])[0]).not.toHaveProperty('source');
     for (const value of [
       'summary',
       'mode=detail',
@@ -276,6 +302,9 @@ describe('ukparl_search_questions', () => {
       record: { ...value, questionId: '701', detailLevel: 'complete' },
     });
     expect(renderedPayload(text(result))).toMatchObject({ record: value });
+    expect(result.structuredContent).toMatchObject({ source: { url: requests[0]!.href } });
+    expect(Reflect.get(result.structuredContent!, 'record')).not.toHaveProperty('source');
+    expect(renderedPayload(text(result)).record).not.toHaveProperty('source');
     for (const url of [
       'https://example.org/one.pdf',
       'https://example.org/two.csv',
@@ -286,19 +315,24 @@ describe('ukparl_search_questions', () => {
     expect(requests[0]!.pathname).toBe('/api/writtenquestions/questions/701');
   });
   it('preserves omitted and null fields without false answer states or attachment counts', async () => {
-    installQuestions(() =>
-      item({ id: 701, uin: null, answerText: null, askingMember: null, groupedQuestions: null }),
-    );
+    installQuestions(() => ({
+      ...item({ id: 701, uin: null, answerText: null, askingMember: null, groupedQuestions: null }),
+      links: null,
+    }));
     const result = await run({ mode: 'detail', questionId: '701' });
     const output = ukparlSearchQuestions.output.parse(result.structuredContent);
     expect(output.record).toMatchObject({
+      uin: null,
+      links: null,
       answerText: null,
       askingMember: null,
       groupedQuestions: null,
     });
     for (const key of ['attachmentCount', 'isWithdrawn', 'dateAnswered', 'answerIsHolding'])
       expect(output.record).not.toHaveProperty(key);
-    expect(renderedPayload(text(result))).toMatchObject({ record: { answerText: null } });
+    expect(renderedPayload(text(result))).toMatchObject({
+      record: { uin: null, answerText: null },
+    });
     expect(renderedPayload(text(result)).record).not.toHaveProperty('attachmentCount');
   });
   it.each([
@@ -386,11 +420,11 @@ describe('ukparl_search_questions', () => {
     expect(result.structuredContent).toMatchObject({
       items: [],
       requestedLimit: Number.MAX_SAFE_INTEGER,
-      cap: 20,
+      cap: 100,
       page: { returned: 0, total: 0, hasMore: false },
     });
-    expect(requests[0]!.searchParams.get('take')).toBe('20');
-    expect(text(result)).toContain('capped at 20');
+    expect(requests[0]!.searchParams.get('take')).toBe('100');
+    expect(text(result)).toContain('capped at 100');
     expect(text(result)).toContain('ukparl_search_questions');
   });
   it('validates complete references and normalizes duplicate answering-body IDs to repeated upstream keys', async () => {
@@ -440,9 +474,10 @@ describe('ukparl_search_questions', () => {
     expect(text(result)).toContain('ukparl_search_questions');
     expect(text(result)).toContain('topic=answering_bodies');
   });
-  it('pages complete whole question records in order under the real framework byte budget', async () => {
-    const rows = Array.from({ length: 7 }, (_, index) => ({
-      ...question(701 + index, '文🏛️'.repeat(250)),
+  it('pages min(limit, cap) whole questions, stops before an oversized record and resumes under a changed limit', async () => {
+    const oversized = '<p>文🏛️ answer</p>'.repeat(1500);
+    const rows = Array.from({ length: 8 }, (_, index) => ({
+      ...question(701 + index, index === 5 ? oversized : '文🏛️'.repeat(400)),
       attachments: [],
     }));
     const { requests } = installQuestions((url) =>
@@ -454,23 +489,57 @@ describe('ukparl_search_questions', () => {
         rows.length,
       ),
     );
-    const ids: string[] = [];
-    let cursor: string | undefined;
-    do {
-      const result = await run({ limit: 7, ...(cursor ? { cursor } : {}) });
+    const full = async (input: Record<string, unknown>, skip: number, take: number) => {
+      const result = await run(input);
       expect(result.isError).not.toBe(true);
-      expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(24000);
+      expect(requests.at(-1)!.searchParams.get('skip')).toBe(String(skip));
+      expect(requests.at(-1)!.searchParams.get('take')).toBe(String(take));
       const output = ukparlSearchQuestions.output.parse(result.structuredContent);
       expect(output.delivery).toBe('full');
-      expect(requests.at(-1)!.searchParams.get('skip')).toBe(String(ids.length));
-      for (const row of output.items!) {
-        ids.push(row.questionId);
+      for (const row of output.items!)
         expect(text(result)).toContain(JSON.stringify(row.answerText));
-      }
-      cursor = output.page!.nextCursor;
-    } while (cursor);
-    expect(ids).toEqual(['701', '702', '703', '704', '705', '706', '707']);
-    expect(requests.length).toBeGreaterThan(1);
+      return { result, output };
+    };
+    // Page one is sized by limit alone, even when the whole reply exceeds 24,000 bytes.
+    const first = await full({ limit: 5 }, 0, 5);
+    expect(Buffer.byteLength(JSON.stringify(first.result))).toBeGreaterThan(24000);
+    expect(first.result.structuredContent).toMatchObject({
+      page: { returned: 5, total: 8, hasMore: true },
+      applied: { limit: 5 },
+      shown: 5,
+      cap: 100,
+    });
+    const ids = first.output.items!.map((row) => row.questionId);
+    // A raised limit resumes at offset 5; the oversized leading record is served alone.
+    const cursor = first.output.page!.nextCursor!;
+    const outlined = await run({ limit: 100, cursor });
+    expect(outlined.isError).not.toBe(true);
+    expect(requests.at(-1)!.searchParams.get('skip')).toBe('5');
+    expect(requests.at(-1)!.searchParams.get('take')).toBe('100');
+    const root = ukparlSearchQuestions.output.parse(outlined.structuredContent);
+    expect(root).toMatchObject({
+      delivery: 'outline',
+      identity: { questionId: '706' },
+      collectionPage: { returned: 1, total: 8, hasMore: true },
+    });
+    expect(outlined.structuredContent).toMatchObject({ shown: 1, truncated: true, cap: 100 });
+    const rebuilt: Record<string, unknown> = {};
+    for (const entry of root.contentPage!.entries!)
+      rebuilt[entry.path.slice(1)] = await reconstruct({ limit: 100, cursor }, entry.contentCursor);
+    expect(rebuilt).toMatchObject({
+      items: [{ questionId: '706', answerText: oversized, detailLevel: 'summary' }],
+      page: root.collectionPage,
+    });
+    expect(rebuilt.items).toHaveLength(1);
+    expect((rebuilt.items as object[])[0]).not.toHaveProperty('source');
+    ids.push('706');
+    const rest = await full({ limit: 100, cursor: root.collectionPage!.nextCursor }, 6, 100);
+    expect(rest.result.structuredContent).toMatchObject({
+      page: { returned: 2, total: 8, hasMore: false },
+      cap: 100,
+    });
+    ids.push(...rest.output.items!.map((row) => row.questionId));
+    expect(ids).toEqual(['701', '702', '703', '704', '705', '706', '707', '708']);
   });
   it('rejects malformed, filter-bound and source-bound collection cursors before I/O', async () => {
     const { requests } = installQuestions(() => page([question()], 2));
@@ -505,36 +574,12 @@ describe('ukparl_search_questions', () => {
     expect(initial.isError).not.toBe(true);
     const root = ukparlSearchQuestions.output.parse(initial.structuredContent);
     expect(root.delivery).toBe('outline');
-    async function retrieve(cursor: string): Promise<unknown> {
-      let next: string | undefined = cursor;
-      const fragments: string[] = [];
-      const children: [string, unknown][] = [];
-      let kind = '';
-      do {
-        const result = await run({ mode: 'detail', questionId: '701', contentCursor: next });
-        expect(result.isError).not.toBe(true);
-        expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(24000);
-        const output = ukparlSearchQuestions.output.parse(result.structuredContent);
-        const content = output.contentPage!;
-        kind = content.kind;
-        expect(text(result)).toContain('ukparl_search_questions');
-        if (content.fragment !== undefined) {
-          fragments.push(content.fragment);
-          expect(text(result)).toContain(JSON.stringify(content.fragment));
-        }
-        for (const entry of content.entries ?? [])
-          children.push([entry.path.split('/').at(-1)!, await retrieve(entry.contentCursor)]);
-        next = content.nextCursor;
-      } while (next);
-      return fragments.length
-        ? JSON.parse(fragments.join(''))
-        : kind === 'array'
-          ? children.map(([, value]) => value)
-          : Object.fromEntries(children);
-    }
     const reconstructed: Record<string, unknown> = {};
     for (const entry of root.contentPage!.entries!)
-      reconstructed[entry.path.slice(1)] = await retrieve(entry.contentCursor);
+      reconstructed[entry.path.slice(1)] = await reconstruct(
+        { mode: 'detail', questionId: '701' },
+        entry.contentCursor,
+      );
     expect(reconstructed).toMatchObject({
       record: { ...question(701, answer), questionId: '701', detailLevel: 'complete' },
     });
@@ -552,10 +597,12 @@ describe('ukparl_search_questions', () => {
     expect(text(rebound)).toContain('no cursor or contentCursor');
     answer = 'Changed answer';
     const changed = await run({ mode: 'detail', questionId: '701', contentCursor: cursor });
+    const hint =
+      'Repeat the same tool with its original filters and any collection cursor, but no contentCursor, then follow the new content cursors.';
     expect(changed.structuredContent).toMatchObject({
-      error: { data: { reason: 'source_changed' } },
+      error: { data: { reason: 'source_changed', recovery: { hint } } },
     });
-    expect(text(changed)).toContain('original filters');
+    expect(text(changed)).toContain(hint);
   });
   it.each([
     [400, 'http_invalid_params', JsonRpcErrorCode.InvalidParams],
@@ -564,6 +611,7 @@ describe('ukparl_search_questions', () => {
     [409, 'http_conflict', JsonRpcErrorCode.Conflict],
     [429, 'http_rate_limited', JsonRpcErrorCode.RateLimited],
     [302, 'http_invalid_request', JsonRpcErrorCode.InvalidRequest],
+    [500, 'http_server_error', JsonRpcErrorCode.ServiceUnavailable],
   ] as const)(
     'preserves HTTP %s and actionable recovery on both surfaces',
     async (status, reason, code) => {
@@ -578,6 +626,41 @@ describe('ukparl_search_questions', () => {
       expect(text(result)).toContain('ukparl_search_questions');
     },
   );
+  it.each([
+    [{ query: 'housing' }, 'items'],
+    [{ mode: 'detail', questionId: '701' }, 'found'],
+  ] as const)(
+    'reports a stalled source for %j as call_deadline_exceeded, never an empty or missing result',
+    async (input, successKey) => {
+      vi.useFakeTimers();
+      installQuestions(
+        (_url, signal) =>
+          new Promise<Response>((_resolve, reject) =>
+            signal.addEventListener('abort', () => reject(signal.reason), { once: true }),
+          ),
+      );
+      const pending = run(input);
+      await vi.advanceTimersByTimeAsync(45_000);
+      const result = await pending;
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: { code: JsonRpcErrorCode.Timeout, data: { reason: 'call_deadline_exceeded' } },
+      });
+      expect(result.structuredContent).not.toHaveProperty(successKey);
+      expect(text(result)).toContain('call_deadline_exceeded');
+      expect(text(result)).toContain('ukparl_search_questions');
+    },
+  );
+  it('declares the call deadline with ukparl_search_questions recovery', () => {
+    expect(ukparlSearchQuestions.errors).toContainEqual(
+      expect.objectContaining({
+        reason: 'call_deadline_exceeded',
+        code: JsonRpcErrorCode.Timeout,
+        thrownBy: 'service',
+        recovery: expect.stringContaining('ukparl_search_questions'),
+      }),
+    );
+  });
   it('reports queue_full at the real saturated network boundary with same-tool recovery', async () => {
     let started = 0;
     let notifyStarted: (() => void) | undefined;
@@ -624,6 +707,12 @@ describe('ukparl_search_questions', () => {
       () => Response.json({ totalResults: 0 }),
       JsonRpcErrorCode.ValidationError,
     ],
+    [
+      'page larger than requested',
+      () => page(Array.from({ length: 11 }, (_, index) => question(700 + index))),
+      JsonRpcErrorCode.ValidationError,
+    ],
+    ['empty page inside the reported total', () => page([], 5), JsonRpcErrorCode.ValidationError],
   ] as const)('keeps %s explicit instead of reporting no match', async (_name, response, code) => {
     const { requests } = installQuestions(response);
     const result = await run();

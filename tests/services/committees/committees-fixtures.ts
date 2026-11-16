@@ -320,6 +320,50 @@ export function evidence(type: 'written' | 'oral') {
         hcNumbers: [{ number: 'HC 10', sessionId: 40 }, { number: null }],
       };
 }
+/** Evidence whose own document lists an Html rendition beside the shared original and sparse files. */
+export function htmlEvidence(type: 'written' | 'oral') {
+  const raw = evidence(type);
+  return {
+    ...raw,
+    document: {
+      documentId: 61,
+      files: [
+        ...raw.document!.files,
+        {
+          fileName: 'TEST0001.Html',
+          fileSize: 241900,
+          fileDataFormat: 'Html',
+          url: null,
+          documentPurpose: null,
+          format: 'docx',
+        },
+      ],
+    },
+  };
+}
+/** Official document-route envelope: base64 file bytes beside rendition metadata. */
+export function documentEnvelope(html: string, data = Buffer.from(html).toString('base64')) {
+  return {
+    data,
+    fileName: 'TEST0001.Html',
+    fileSize: Buffer.byteLength(html),
+    fileDataFormat: 'Html',
+    url: null,
+    documentPurpose: null,
+    format: null,
+  };
+}
+/** Deterministic transcript Html of exactly `bytes` UTF-8 bytes with quotes, escapes and multibyte text. */
+export function transcript(bytes: number): string {
+  const unit = '<p class="speech">Q1 “Chair”: evidence Ω 🏛️ \\ &amp; `code`</p>\r\n';
+  const unitBytes = Buffer.byteLength(unit);
+  const count = Math.floor(bytes / unitBytes);
+  return unit.repeat(count) + 'x'.repeat(bytes - count * unitBytes);
+}
+/** A source record without the keys a collection item omits. */
+export function without(record: object, ...keys: string[]): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(record).filter(([key]) => !keys.includes(key)));
+}
 /** Native collection shape; null and array absence are distinct source states. */
 export function page(items: unknown[] | null, totalResults = items?.length ?? 0) {
   return {
@@ -347,7 +391,11 @@ export function installCommittees(route: (url: URL) => unknown | Response) {
   initCommittees();
   return requests;
 }
-/** Invert typed relationships without importing a production normalizer or raw schema. */
+/**
+ * Invert typed relationships without importing a production normalizer or raw schema. A file's
+ * `apiRoute` is derived from its record IDs rather than read from the source, so it is skipped here
+ * and asserted directly where it matters.
+ */
 export function reconstruct(record: z.infer<typeof CommitteeRecordSchema>): unknown {
   const nodes = new Map(record.entities.map((node) => [node.sourcePath, node]));
   expect(nodes.size).toBe(record.entities.length);
@@ -359,7 +407,10 @@ export function reconstruct(record: z.infer<typeof CommitteeRecordSchema>): unkn
     visited.add(path);
     return Object.fromEntries(
       Object.entries(node)
-        .filter(([key, value]) => key !== 'kind' && key !== 'sourcePath' && value !== undefined)
+        .filter(
+          ([key, value]) =>
+            key !== 'kind' && key !== 'sourcePath' && key !== 'apiRoute' && value !== undefined,
+        )
         .map(([key, value]) => {
           if (key.endsWith('Paths'))
             return [key.slice(0, -5), value === null ? null : (value as string[]).map(read)];

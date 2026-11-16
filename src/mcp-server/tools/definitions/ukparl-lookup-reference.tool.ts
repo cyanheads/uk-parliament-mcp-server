@@ -127,6 +127,13 @@ const identifiers: z.infer<typeof IdentifiersSchema> = {
         'A question UIN is not a questionId. Search with uin and optional tabledFrom/tabledTo to find candidates across sessions; use returned questionId for detail.',
     },
     {
+      namespace: 'statementId',
+      format: 'Positive int32 decimal string.',
+      discovery: 'ukparl_search_statements mode=search',
+      distinction:
+        'A statement UIN such as HLWS419 is not a statementId and is reused across sessions; narrow uin with madeFrom/madeTo. A CorrectedAnswer link carries a questionId, not a statementId.',
+    },
+    {
       namespace: 'committeeId, businessId, publicationId and evidenceId',
       format: 'Positive int32 decimal strings.',
       discovery: 'ukparl_get_committee mode=search and its returned collections',
@@ -144,7 +151,7 @@ const identifiers: z.infer<typeof IdentifiersSchema> = {
       format: 'Positive int32 decimal strings.',
       discovery: 'ukparl_lookup_reference matching topic',
       distinction:
-        'Department IDs from topic=departments filter ukparl_search_bills.departmentId; answeringBodyId filters written questions and is a separate namespace. Active parties are not an exhaustive historical party directory.',
+        'Department IDs from topic=departments filter ukparl_search_bills.departmentId; answeringBodyId filters written questions and statements and is a separate namespace. Active parties are not an exhaustive historical party directory.',
     },
   ],
   modes: [
@@ -167,6 +174,7 @@ const identifiers: z.infer<typeof IdentifiersSchema> = {
     },
     { tool: 'ukparl_search_divisions', selectors: ['search', 'detail', 'voters', 'party_totals'] },
     { tool: 'ukparl_search_questions', selectors: ['search', 'detail'] },
+    { tool: 'ukparl_search_statements', selectors: ['search', 'detail'] },
     {
       tool: 'ukparl_get_committee',
       selectors: [
@@ -179,6 +187,7 @@ const identifiers: z.infer<typeof IdentifiersSchema> = {
         'publication',
         'evidence',
         'evidence_detail',
+        'evidence_document',
       ],
     },
   ],
@@ -207,6 +216,8 @@ const coverage: z.infer<typeof CoverageSchema> = {
     'No dates imply no current-only scope. Earlier or crossing ranges pass unchanged to the spoken API with coverage guidance. Empty results do not establish no debate occurred. Samples do not establish continuous historical coverage. After a timeout repeat ukparl_search_hansard with shorter date windows. Historic Hansard is not an automatic fallback.',
 };
 
+/** Most whole reference rows one call returns. */
+const ROW_CAP = 20;
 const ReferenceSchema = z
   .object({
     ...Bills.reference.shape,
@@ -300,7 +311,13 @@ export const ukparlLookupReference = tool('ukparl_lookup_reference', {
       .int()
       .optional()
       .describe('Actual whole reference rows selected for delivery.'),
-    cap: z.number().int().optional().describe('Effective maximum whole reference rows per call.'),
+    cap: z
+      .number()
+      .int()
+      .optional()
+      .describe(
+        'Mode cap, the most whole reference rows one call can return (20); the effective limit is applied.limit.',
+      ),
   },
   enrichmentTrailer: {
     applied: { render: enrichmentField('applied') },
@@ -351,9 +368,33 @@ export const ukparlLookupReference = tool('ukparl_lookup_reference', {
     {
       reason: 'http_rate_limited',
       code: JsonRpcErrorCode.RateLimited,
-      when: 'The official reference API or local origin queue is rate limited.',
+      when: 'The official reference API returned HTTP 429 after bounded retry handling.',
       recovery: 'Wait before repeating ukparl_lookup_reference and reduce concurrent calls.',
       retryable: true,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'queue_full',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'The Bills or Members reference origin request queue is full.',
+      recovery:
+        'Wait briefly, then repeat ukparl_lookup_reference with the same topic and filters.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'call_deadline_exceeded',
+      code: JsonRpcErrorCode.Timeout,
+      when: 'The 45-second call deadline elapsed before the official reference API answered.',
+      recovery:
+        'Repeat ukparl_lookup_reference with the same topic after a short wait; topic=identifiers and topic=coverage answer without the live source.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'http_server_error',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'The official reference API returned an HTTP 5xx server error.',
+      recovery:
+        'Repeat ukparl_lookup_reference with the same topic after a short wait; topic=identifiers and topic=coverage answer without the live source.',
       thrownBy: 'service',
     },
     {
@@ -376,12 +417,12 @@ export const ukparlLookupReference = tool('ukparl_lookup_reference', {
       code: JsonRpcErrorCode.Conflict,
       when: 'The selected normalized payload changed during content continuation.',
       recovery:
-        'Repeat the same tool with its original filters and no contentCursor, then follow the new content cursors.',
+        'Repeat the same tool with its original filters and any collection cursor, but no contentCursor, then follow the new content cursors.',
       thrownBy: 'service',
     },
   ],
   async handler(input, ctx) {
-    const limit = Math.min(input.limit, 20);
+    const limit = Math.min(input.limit, ROW_CAP);
     const isStatic = input.topic === 'identifiers' || input.topic === 'coverage';
     const staticConflicts = (['house', 'nameContains', 'cursor'] as const).filter(
       (field) => input[field],
@@ -409,10 +450,10 @@ export const ukparlLookupReference = tool('ukparl_lookup_reference', {
       limit,
       source: isStatic ? 'static_official_source_guide' : 'official_reference_api',
     };
-    let notice = `${LICENCE_NOTICE}${input.limit > 20 ? ` Requested limit ${input.limit} is capped at 20 reference rows.` : ''}`;
+    let notice = `${LICENCE_NOTICE}${input.limit > ROW_CAP ? ` Requested limit ${input.limit} is capped at ${ROW_CAP} reference rows.` : ''}`;
     const enrichment = {
       applied,
-      ...(input.limit > 20 ? { requestedLimit: input.limit } : {}),
+      ...(input.limit > ROW_CAP ? { requestedLimit: input.limit } : {}),
     };
     if (isStatic) {
       const payload =
@@ -427,11 +468,12 @@ export const ukparlLookupReference = tool('ukparl_lookup_reference', {
         applyEnrichment: (values) => ctx.enrich(values),
       });
     }
-    const selection = { topic: input.topic, house: input.house, nameContains, limit };
+    // The collection binding omits limit so a cursor resumes at its offset under any limit.
+    const filters = { topic: input.topic, house: input.house, nameContains };
     const cursor = readCollectionCursor(input.cursor, {
       source: 'official_reference_api',
       selector: input.topic,
-      filters: selection,
+      filters,
       nativePageSize: limit,
     });
     using call = getParliamentHttp().beginCall(ctx);
@@ -499,7 +541,7 @@ export const ukparlLookupReference = tool('ukparl_lookup_reference', {
     if (!source) throw validationError('Reference source returned no request provenance.');
     return deliverPayload(payload, {
       tool: 'ukparl_lookup_reference',
-      selection: { ...selection, cursor: input.cursor },
+      selection: { ...filters, limit, cursor: input.cursor },
       contentCursor: input.contentCursor,
       collection: { count: payload.items.length, repage: page },
       retained: (selected) => ({
@@ -512,7 +554,7 @@ export const ukparlLookupReference = tool('ukparl_lookup_reference', {
         notice,
         totalCount: selected.page.total,
         ...(selected.page.hasMore
-          ? { truncated: true, shown: selected.items.length, cap: limit }
+          ? { truncated: true, shown: selected.items.length, cap: ROW_CAP }
           : {}),
       }),
       applyEnrichment: (values) => ctx.enrich(values),

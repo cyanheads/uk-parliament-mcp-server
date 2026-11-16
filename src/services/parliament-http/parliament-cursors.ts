@@ -25,14 +25,9 @@ export function digest(value: unknown, omitRetrieval = false): string {
     .update(JSON.stringify(canonical(value, omitRetrieval)))
     .digest('base64url');
 }
-/** Raise the shared cursor failure with a restart instruction. */
+/** Raise the shared cursor failure; each tool's declared `invalid_cursor` recovery fills the hint. */
 export function invalidCursor(): never {
-  throw invalidParams('Cursor does not match this selection.', {
-    reason: 'invalid_cursor',
-    recovery: {
-      hint: 'Repeat the same tool with the same filters and no cursor or contentCursor to start a new page sequence.',
-    },
-  });
+  throw invalidParams('Cursor does not match this selection.', { reason: 'invalid_cursor' });
 }
 /** Strict collection cursor keeps native-page remainders without losing rows. */
 export const CollectionCursorSchema = z
@@ -82,7 +77,10 @@ export function decodeCursor<T extends z.ZodType>(value: string, schema: T): z.i
   if (!result.success) return invalidCursor();
   return result.data;
 }
-/** Validate binding before a collection cursor can influence upstream offsets. */
+/**
+ * Validate binding before a collection cursor can influence upstream offsets. A native-page cursor
+ * stays bound to its page size; an offset cursor resumes under the current effective limit.
+ */
 export function readCollectionCursor(
   value: string | undefined,
   binding: { source: string; selector: string; filters: unknown; nativePageSize: number },
@@ -99,14 +97,16 @@ export function readCollectionCursor(
     cursor.source !== expected.source ||
     cursor.selector !== expected.selector ||
     cursor.filters !== expected.filters ||
-    cursor.nativePageSize !== expected.nativePageSize ||
     (cursor.intraPageOffset !== undefined && cursor.intraPageOffset >= cursor.nativePageSize) ||
     (cursor.nativePage !== undefined &&
-      cursor.offset !==
-        (cursor.nativePage - 1) * cursor.nativePageSize + (cursor.intraPageOffset ?? 0))
+      (cursor.nativePageSize !== expected.nativePageSize ||
+        cursor.offset !==
+          (cursor.nativePage - 1) * cursor.nativePageSize + (cursor.intraPageOffset ?? 0)))
   )
     return invalidCursor();
-  return cursor;
+  return cursor.nativePage === undefined
+    ? { ...cursor, nativePageSize: expected.nativePageSize }
+    : cursor;
 }
 /** Advance by emitted whole items, preserving a native page's unreturned remainder. */
 export function advanceCollectionCursor(cursor: CollectionCursor, emitted: number): string {

@@ -118,6 +118,45 @@ describe('DivisionsService', () => {
     expect(result.payload.record!.tellers!.map((voter) => voter.memberId)).toEqual(['2', '5']);
   });
 
+  it('reads a Commons deferred division, which has no tellers, as a complete roster', async () => {
+    installDivisions(() => ({
+      ...commonsDivision(),
+      IsDeferred: true,
+      AyeCount: 2,
+      NoCount: 1,
+      Ayes: [
+        { MemberId: 1, Party: 'Synthetic Labour' },
+        { MemberId: 2, Party: 'Synthetic Labour' },
+      ],
+      AyeTellers: null,
+      Noes: [{ MemberId: 6, Party: 'Synthetic Conservative' }],
+      NoTellers: null,
+    }));
+    const http = getParliamentHttp();
+    using call = http.beginCall(createMockContext());
+    const result = await new DivisionsService(http).execute(
+      { house: 'commons', mode: 'party_totals', divisionId: '42', limit: 20 },
+      call,
+    );
+    expect(result.payload.guidance).toBeUndefined();
+    expect(result.payload.partyTotals).toEqual([
+      { party: 'Synthetic Labour', lobby: 'aye', voterCount: 2, tellerCount: 0 },
+      { party: 'Synthetic Conservative', lobby: 'no', voterCount: 1, tellerCount: 0 },
+      { party: 'Synthetic Labour', lobby: 'not_recorded', voterCount: 1, tellerCount: 0 },
+    ]);
+    expect(result.payload.record!.rosterSelectors).toEqual([
+      { lobby: 'aye', membersKnown: true, tellersKnown: true, count: 2, selector: 'voters' },
+      { lobby: 'no', membersKnown: true, tellersKnown: true, count: 1, selector: 'voters' },
+      {
+        lobby: 'not_recorded',
+        membersKnown: true,
+        tellersKnown: true,
+        count: 1,
+        selector: 'voters',
+      },
+    ]);
+  });
+
   it('preserves Lords official totals separately from independently counted roster groups', async () => {
     installDivisions(() => lordsDivision());
     const http = getParliamentHttp();

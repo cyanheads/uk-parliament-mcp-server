@@ -46,6 +46,7 @@ const ModeSchema = z.enum([
   'publication',
   'evidence',
   'evidence_detail',
+  'evidence_document',
 ]);
 const CommitteeHouseSchema = z.preprocess(
   (value) => {
@@ -63,7 +64,7 @@ const SelectionShape = {
     .boolean()
     .optional()
     .describe(
-      'Inquiries only: true selects accepting businesses; false leaves source selection unrestricted.',
+      'Inquiries only: true selects businesses currently accepting evidence; false is the same as omitting it and is not echoed.',
     ),
   openedFrom: optionalText(DateSchema).describe('Inquiries opened on/after this ISO date.'),
   openedTo: optionalText(DateSchema).describe('Inquiries opened on/before this ISO date.'),
@@ -126,9 +127,20 @@ const OutputSchema = z.object({
   items: z
     .array(CommitteeRecordSchema.describe('Whole source record.'))
     .optional()
-    .describe('Selected whole collection items.'),
+    .describe(
+      'Selected whole collection items. Publication items omit their committee and written-evidence items their committees and business, which every row repeats; the detail modes return them.',
+    ),
   page: PageSchema.optional().describe('Whole-record collection continuation.'),
   source: SourceSchema.optional().describe('Actual selected official request provenance.'),
+  documentHtml: z
+    .string()
+    .optional()
+    .describe(
+      'evidence_document only: the published Html rendition, base64-decoded as UTF-8 and returned verbatim; absent when none is published.',
+    ),
+  documentSource: SourceSchema.optional().describe(
+    'evidence_document only: provenance of the Html document request.',
+  ),
   sourcePage: z
     .object({
       itemsPerPage: z.number().int().describe('Source-reported page size.'),
@@ -149,12 +161,12 @@ const OutputSchema = z.object({
 export const ukparlGetCommittee = tool('ukparl_get_committee', {
   title: 'Get committees and evidence',
   description:
-    'Find Westminster committees with mode=search, then use committeeId for detail, members, inquiries or publications. Inquiries returns every committee business type, labelled by isInquiry; use businessId with mode=inquiry for complete business detail or to filter publications. Use publicationId with mode=publication for complete report/publication metadata and source links. Use mode=evidence with businessId and evidenceType=written|oral to list evidence; mode=evidence_detail requires evidenceId and evidenceType in the same namespace. Memberships retain all role periods; personId is distinct from Members API memberId. No document downloads or text extraction. Follow cursors with unchanged filters; contentCursor retrieves oversized records losslessly. Typed entities retain sourcePath relationships to reconstruct nested source metadata.',
+    'Find Westminster committees with mode=search, then use committeeId for detail, members, inquiries or publications. Inquiries returns every committee business type, labelled by isInquiry; use businessId with mode=inquiry for complete business detail or to filter publications. Use publicationId with mode=publication for complete report/publication metadata and source links. Use mode=evidence with businessId and evidenceType=written|oral to list evidence; mode=evidence_detail requires evidenceId and evidenceType in the same namespace, and mode=evidence_document takes the same pair and adds the published Html rendition as documentHtml. Memberships retain all role periods; personId is distinct from Members API memberId. Publication files and other renditions are not downloaded, and no text is extracted. Follow cursors with unchanged filters; contentCursor retrieves oversized records losslessly. Typed entities retain sourcePath relationships to reconstruct nested source metadata.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     ...SelectionShape,
     mode: ModeSchema.default('search').describe(
-      'Search, committee detail, members, business list/detail, publication list/detail or written/oral evidence list/detail.',
+      'Search, committee detail, members, business list/detail, publication list/detail, written/oral evidence list/detail, or evidence_document for evidence detail plus its Html rendition.',
     ),
     query: optionalText(z.string().trim().min(1)).describe(
       'Search terms for search, inquiries or publications; latter two require at least two characters.',
@@ -171,20 +183,22 @@ export const ukparlGetCommittee = tool('ukparl_get_committee', {
     publicationId: optionalText(IdSchema).describe(
       'Publication ID required for publication detail.',
     ),
-    evidenceId: optionalText(IdSchema).describe('Evidence detail ID, scoped by evidenceType.'),
+    evidenceId: optionalText(IdSchema).describe(
+      'Evidence ID for evidence_detail or evidence_document, scoped by evidenceType.',
+    ),
     evidenceType: optionalText(z.enum(['written', 'oral'])).describe(
-      'Required for evidence list/detail; written and oral IDs are distinct.',
+      'Required for evidence, evidence_detail and evidence_document; written and oral IDs are distinct.',
     ),
     membership: optionalText(z.enum(['all', 'current', 'former'])).describe(
       'Members mode only, default all; filters role-period membership status.',
     ),
     cursor: optionalText(z.string().min(1)).describe(
-      'Opaque collection continuation; repeat unchanged filters and effective limit.',
+      'Opaque collection continuation; repeat unchanged filters. It resumes at its offset under any limit.',
     ),
     limit: LimitSchema.removeDefault()
       .optional()
       .describe(
-        'Collection size: search default 10 cap 20; nested default 20 cap 50. Safe over-cap values clamp. Omit for singular modes.',
+        'Whole records per collection page, default 10, cap 100; larger safe integers clamp to 100 with a notice. Omit for singular modes.',
       ),
     contentCursor: optionalText(z.string().min(1)).describe(
       'Opaque same-selection content continuation; reconstruct records before advancing collection cursor.',
@@ -200,7 +214,11 @@ export const ukparlGetCommittee = tool('ukparl_get_committee', {
     total: z.number().int().optional().describe('Source total collection records.'),
     truncated: z.boolean().optional().describe('Further whole collection records remain.'),
     shown: z.number().int().optional().describe('Actually emitted whole collection records.'),
-    cap: z.number().int().optional().describe('Maximum collection workload for this mode.'),
+    cap: z
+      .number()
+      .int()
+      .optional()
+      .describe('Page-size ceiling for this mode; a larger limit is clamped to it.'),
   },
   enrichmentTrailer: {
     applied: { render: enrichmentField('applied') },
@@ -301,7 +319,23 @@ export const ukparlGetCommittee = tool('ukparl_get_committee', {
       thrownBy: 'service',
       when: 'Selected source metadata changed during content retrieval.',
       recovery:
-        'Repeat the same tool with original filters and no contentCursor, then follow the new content cursors.',
+        'Repeat the same tool with original filters and any collection cursor, but no contentCursor, then follow the new content cursors.',
+    },
+    {
+      reason: 'call_deadline_exceeded',
+      code: JsonRpcErrorCode.Timeout,
+      thrownBy: 'service',
+      when: 'The 45-second call deadline elapsed before the official API answered.',
+      recovery:
+        'Repeat ukparl_get_committee once after a short wait; if it times out again, lower limit, add committeeId to inquiries, or shorten the opened or published date window.',
+    },
+    {
+      reason: 'http_server_error',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      thrownBy: 'service',
+      when: 'The official API returned an HTTP 5xx server error.',
+      recovery:
+        'Repeat ukparl_get_committee with a lower limit, a committeeId for inquiries, or a shorter opened or published date window; retry later if it still fails.',
     },
   ],
   async handler(input, ctx) {
@@ -338,7 +372,9 @@ export const ukparlGetCommittee = tool('ukparl_get_committee', {
       publication: ['publicationId'],
       evidence: ['businessId', 'evidenceType'],
       evidence_detail: ['evidenceId', 'evidenceType'],
+      evidence_document: ['evidenceId', 'evidenceType'],
     };
+    const evidenceRecord = mode === 'evidence_detail' || mode === 'evidence_document';
     const filters = FiltersSchema.parse({
       status: input.status,
       acceptingEvidence: input.acceptingEvidence,
@@ -362,7 +398,7 @@ export const ukparlGetCommittee = tool('ukparl_get_committee', {
         ? 'businessId'
         : mode === 'publication'
           ? 'publicationId'
-          : mode === 'evidence_detail'
+          : evidenceRecord
             ? 'evidenceId'
             : 'committeeId';
     const requiredId = mode === 'search' ? undefined : input[requiredField];
@@ -378,7 +414,7 @@ export const ukparlGetCommittee = tool('ukparl_get_committee', {
     const conflicts: string[] = [];
     if (mode !== 'search' && mode !== 'inquiries' && requiredId === undefined)
       conflicts.push(missingIdMessage);
-    if ((mode === 'evidence' || mode === 'evidence_detail') && input.evidenceType === undefined)
+    if ((mode === 'evidence' || evidenceRecord) && input.evidenceType === undefined)
       conflicts.push(
         `mode=${mode} requires evidenceType=written or evidenceType=oral; select the evidence namespace.`,
       );
@@ -440,11 +476,13 @@ export const ukparlGetCommittee = tool('ukparl_get_committee', {
         `query in mode=${mode} requires at least 2 characters; supply a longer query or omit query.`,
       );
     if (conflicts.length > 0) throw ctx.fail('invalid_mode_arguments', conflicts.join(' '));
+    // The source ignores CurrentlyAcceptingEvidence=false, so false selects what omission does.
+    if (filters.acceptingEvidence === false) delete filters.acceptingEvidence;
     validateDateRange(input.openedFrom, input.openedTo);
     validateDateRange(input.publishedFrom, input.publishedTo);
     if (mode === 'members') filters.membership = input.membership ?? 'all';
-    const cap = mode === 'search' ? 20 : 50;
-    const requestedLimit = input.limit ?? (mode === 'search' ? 10 : 20);
+    const cap = 100;
+    const requestedLimit = input.limit ?? 10;
     const limit = Math.min(cap, requestedLimit);
     const selection = { mode, filters, ...(collection ? { limit, cursor: input.cursor } : {}) };
     const applied = AppliedSchema.parse({
@@ -464,7 +502,7 @@ export const ukparlGetCommittee = tool('ukparl_get_committee', {
           }
         : {}),
     });
-    const notice = `${LICENCE_NOTICE} Committee personId and membership recordId are source-specific; memberId comes only from memberInfo.mnisId. Inquiries includes every business type, including isInquiry=false. Document/file metadata and source-provided links only; a null file URL is unavailable and additionalContentUrl may provide the published report. No downloads or text extraction.${collection && requestedLimit > cap ? ` Requested limit ${requestedLimit} is capped at ${cap}.` : ''}`;
+    const notice = `${LICENCE_NOTICE} Committee personId and membership recordId are source-specific; memberId comes only from memberInfo.mnisId. Inquiries includes every business type, including isInquiry=false. A null file URL is unavailable; apiRoute is a relative Committees API route returning base64 JSON, not a public page, and additionalContentUrl may provide the published report. Only mode=evidence_document downloads a file: the evidence Html rendition, verbatim, without text extraction.${collection && requestedLimit > cap ? ` Requested limit ${requestedLimit} is capped at ${cap}.` : ''}`;
     const enrichment = {
       applied,
       notice,
@@ -474,25 +512,38 @@ export const ukparlGetCommittee = tool('ukparl_get_committee', {
       using call = getParliamentHttp().beginCall(ctx);
       const service = getCommittees();
       if (!requiredId) throw ctx.fail('invalid_mode_arguments', missingIdMessage);
+      const withDocument =
+        mode === 'evidence_document' && input.evidenceType
+          ? await service.evidenceDocument(call, input.evidenceType, requiredId)
+          : undefined;
       const response =
-        mode === 'detail'
-          ? await service.detail(call, requiredId)
-          : mode === 'inquiry'
-            ? await service.inquiry(call, requiredId)
-            : mode === 'evidence_detail' && input.evidenceType
-              ? await service.evidenceDetail(call, input.evidenceType, requiredId)
-              : await service.publication(call, requiredId);
+        mode === 'evidence_document'
+          ? withDocument
+          : mode === 'detail'
+            ? await service.detail(call, requiredId)
+            : mode === 'inquiry'
+              ? await service.inquiry(call, requiredId)
+              : mode === 'evidence_detail' && input.evidenceType
+                ? await service.evidenceDetail(call, input.evidenceType, requiredId)
+                : await service.publication(call, requiredId);
+      const document = withDocument?.document;
       const payload = {
         mode,
         filters,
         found: response !== undefined,
         ...(response
-          ? { record: response.data, source: response.source }
+          ? {
+              record: response.data,
+              source: response.source,
+              ...(document ? { documentHtml: document.html, documentSource: document.source } : {}),
+            }
           : {
               guidance:
                 'No website-visible source record matched. Repeat ukparl_get_committee in search, inquiries, publications or evidence mode to discover the correct namespace ID.',
             }),
       };
+      const unpublished =
+        mode === 'evidence_document' && response !== undefined && document === undefined;
       return deliverPayload(payload, {
         tool: 'ukparl_get_committee',
         selection,
@@ -501,7 +552,12 @@ export const ukparlGetCommittee = tool('ukparl_get_committee', {
           ...('source' in selected ? { source: selected.source } : {}),
           identity: { recordId: requiredId },
         }),
-        enrichmentFor: () => enrichment,
+        enrichmentFor: () => ({
+          ...enrichment,
+          ...(unpublished
+            ? { notice: `${notice} No Html rendition is published for this evidence.` }
+            : {}),
+        }),
         applyEnrichment: (values) => ctx.enrich(values),
       });
     }

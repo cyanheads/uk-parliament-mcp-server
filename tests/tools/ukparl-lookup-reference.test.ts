@@ -19,7 +19,7 @@ import {
   initParliamentHttp,
 } from '@/services/parliament-http/parliament-http-service.js';
 import { LICENCE_NOTICE, LICENCE_URL } from '@/services/parliament-http/parliament-models.js';
-import { renderedPayload } from './rendered-payload.js';
+import { renderedPayload, text } from './rendered-payload.js';
 
 function installReference(route: (url: URL) => unknown | Response) {
   const requests: URL[] = [];
@@ -42,13 +42,6 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-function text(result: Awaited<ReturnType<typeof runToolContract>>): string {
-  return result.content
-    .filter((block) => block.type === 'text')
-    .map((block) => block.text)
-    .join('\n');
-}
-
 describe('ukparl_lookup_reference static guides', () => {
   it('preserves identifier namespaces and exact selection names on both surfaces', async () => {
     const result = await runToolContract(ukparlLookupReference, { topic: 'identifiers' });
@@ -70,6 +63,7 @@ describe('ukparl_lookup_reference static guides', () => {
       'inquiries',
       'publication',
       'evidence_detail',
+      'evidence_document',
       'evidenceType',
       'ukparl_search_bills.departmentId',
       'candidates across sessions',
@@ -78,6 +72,37 @@ describe('ukparl_lookup_reference static guides', () => {
     ])
       expect(text(result)).toContain(term);
     expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(24000);
+  });
+
+  it('separates statement IDs from UINs, question IDs and answering bodies on both surfaces', async () => {
+    const result = await runToolContract(ukparlLookupReference, { topic: 'identifiers' });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      identifiers: {
+        namespaces: expect.arrayContaining([
+          {
+            namespace: 'statementId',
+            format: 'Positive int32 decimal string.',
+            discovery: 'ukparl_search_statements mode=search',
+            distinction: expect.stringContaining('CorrectedAnswer link carries a questionId'),
+          },
+          expect.objectContaining({
+            namespace: 'partyId, departmentId and answeringBodyId',
+            distinction: expect.stringContaining(
+              'answeringBodyId filters written questions and statements and is a separate namespace',
+            ),
+          }),
+        ]),
+        modes: expect.arrayContaining([
+          { tool: 'ukparl_search_statements', selectors: ['search', 'detail'] },
+        ]),
+      },
+    });
+    const rendered = renderedPayload(text(result));
+    expect(rendered.identifiers).toEqual(
+      (result.structuredContent as { identifiers: unknown }).identifiers,
+    );
+    expect(text(result)).toContain('HLWS419 is not a statementId');
   });
 
   it('keeps coverage uncertainty, null API minimum and official sources on both surfaces', async () => {
@@ -195,12 +220,14 @@ describe('ukparl_lookup_reference static guides', () => {
         data: {
           reason: 'source_changed',
           recovery: {
-            hint: 'Repeat the same tool with its original filters and no contentCursor, then follow the new content cursors.',
+            hint: 'Repeat the same tool with its original filters and any collection cursor, but no contentCursor, then follow the new content cursors.',
           },
         },
       },
     });
-    expect(text(result)).toContain('original filters and no contentCursor');
+    expect(text(result)).toContain(
+      'original filters and any collection cursor, but no contentCursor',
+    );
     expect(text(result)).toContain('source_changed');
   });
 
@@ -557,11 +584,12 @@ describe('ukparl_lookup_reference live directories', () => {
     expect(renderedPayload(text(past))).toMatchObject({ items: [] });
   });
 
-  it('binds collection cursors to topic, House, filter and effective limit before I/O', async () => {
+  it('binds collection cursors to topic, House and filter before I/O, and resumes under a changed limit', async () => {
     const requests = installReference(() => ({
       items: [
         { value: { id: 1, name: 'Synthetic One' } },
         { value: { id: 2, name: 'Synthetic Two' } },
+        { value: { id: 3, name: 'Synthetic Three' } },
       ],
       totalResults: 0,
     }));
@@ -576,7 +604,6 @@ describe('ukparl_lookup_reference live directories', () => {
       { topic: 'parties', house: 'lords', nameContains: 'synthetic', limit: 1 },
       { topic: 'departments', nameContains: 'synthetic', limit: 1 },
       { topic: 'parties', house: 'commons', nameContains: 'other', limit: 1 },
-      { topic: 'parties', house: 'commons', nameContains: 'synthetic', limit: 2 },
     ] as const) {
       const result = await runToolContract(ukparlLookupReference, { ...input, cursor });
       expect(result.structuredContent).toMatchObject({
@@ -585,6 +612,19 @@ describe('ukparl_lookup_reference live directories', () => {
       expect(text(result)).toContain('same filters and no cursor or contentCursor');
     }
     expect(requests).toHaveLength(1);
+    const resumed = await runToolContract(ukparlLookupReference, {
+      topic: 'parties',
+      house: 'commons',
+      nameContains: 'synthetic',
+      limit: 2,
+      cursor,
+    });
+    expect(resumed.isError).not.toBe(true);
+    const value = ukparlLookupReference.output.parse(resumed.structuredContent);
+    expect(value.items!.map((item) => item.id)).toEqual(['2', '3']);
+    expect(value.page).toEqual({ returned: 2, total: 3, hasMore: false });
+    expect(renderedPayload(text(resumed))).toEqual(resumed.structuredContent);
+    expect(requests).toHaveLength(2);
   });
 
   it.each([
@@ -624,6 +664,12 @@ describe('ukparl_lookup_reference live directories', () => {
       JsonRpcErrorCode.InvalidRequest,
       'Repeat ukparl_lookup_reference later with the same supported topic and filters.',
     ],
+    [
+      500,
+      'http_server_error',
+      JsonRpcErrorCode.ServiceUnavailable,
+      'Repeat ukparl_lookup_reference with the same topic after a short wait; topic=identifiers and topic=coverage answer without the live source.',
+    ],
   ] as const)(
     'renders HTTP %s with declared recovery on both surfaces',
     async (status, reason, code, hint) => {
@@ -641,7 +687,22 @@ describe('ukparl_lookup_reference live directories', () => {
     },
   );
 
-  it('clamps safe overcap reads and advances byte-limited pages by actual whole rows', async () => {
+  it('declares the transport deadline and origin queue reasons its live topics can raise', () => {
+    for (const [reason, code] of [
+      ['call_deadline_exceeded', JsonRpcErrorCode.Timeout],
+      ['queue_full', JsonRpcErrorCode.RateLimited],
+    ] as const)
+      expect(ukparlLookupReference.errors).toContainEqual(
+        expect.objectContaining({
+          reason,
+          code,
+          thrownBy: 'service',
+          recovery: expect.stringContaining('ukparl_lookup_reference'),
+        }),
+      );
+  });
+
+  it('clamps safe overcap reads, returns limit-sized whole-row pages and resumes under changed limits', async () => {
     const rows = Array.from({ length: 25 }, (_, index) => ({
       id: index + 1,
       name: `Synthetic ${index}`,
@@ -651,29 +712,40 @@ describe('ukparl_lookup_reference live directories', () => {
     installReference(() => rows);
     const ids: string[] = [];
     let cursor: string | undefined;
-    do {
+    // An overcap limit clamps to 20; the cursor then resumes under limit 3 and the default 10.
+    for (const [limit, returned] of [
+      [Number.MAX_SAFE_INTEGER, 20],
+      [3, 3],
+      [undefined, 2],
+    ] as const) {
       const result = await runToolContract(ukparlLookupReference, {
         topic: 'departments',
-        limit: Number.MAX_SAFE_INTEGER,
+        ...(limit ? { limit } : {}),
         ...(cursor ? { cursor } : {}),
       });
       expect(result.isError).not.toBe(true);
-      expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(24_000);
       const output = ukparlLookupReference.output.parse(result.structuredContent);
       expect(output.delivery).toBe('full');
-      expect(output.items!.length).toBeGreaterThan(0);
-      expect(output.items!.length).toBeLessThan(20);
+      expect(output.items).toHaveLength(returned);
+      for (const item of (result.structuredContent as { items: unknown[] }).items)
+        expect(Buffer.byteLength(JSON.stringify(item))).toBeLessThanOrEqual(24_000);
+      const more = returned !== 2;
+      expect(output.page).toMatchObject({ returned, total: 25, hasMore: more });
+      // cap is the reference-row ceiling, never the effective limit of this page.
       expect(result.structuredContent).toMatchObject({
-        applied: { limit: 20 },
-        requestedLimit: Number.MAX_SAFE_INTEGER,
+        applied: { limit: limit === 3 ? 3 : limit ? 20 : 10 },
         totalCount: 25,
+        ...(limit === Number.MAX_SAFE_INTEGER ? { requestedLimit: limit } : {}),
+        ...(more ? { truncated: true, shown: returned, cap: 20 } : {}),
       });
-      for (const item of output.items!) {
-        ids.push(item.id);
-        expect(text(result)).toContain(JSON.stringify(item.name));
-      }
+      if (!more)
+        for (const field of ['truncated', 'shown', 'cap'])
+          expect(result.structuredContent).not.toHaveProperty(field);
+      expect(renderedPayload(text(result))).toEqual(result.structuredContent);
+      ids.push(...output.items!.map((item) => item.id));
       cursor = output.page!.nextCursor;
-    } while (cursor);
+    }
+    expect(cursor).toBeUndefined();
     expect(ids).toEqual(Array.from({ length: 25 }, (_, index) => String(index + 1)));
   });
 
@@ -762,6 +834,8 @@ describe('ukparl_lookup_reference live directories', () => {
     expect(changed.structuredContent).toMatchObject({
       error: { data: { reason: 'source_changed' } },
     });
-    expect(text(changed)).toContain('original filters and no contentCursor');
+    expect(text(changed)).toContain(
+      'original filters and any collection cursor, but no contentCursor',
+    );
   });
 });

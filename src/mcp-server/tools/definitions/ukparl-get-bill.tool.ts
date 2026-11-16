@@ -22,6 +22,8 @@ import {
   optionalText,
 } from '@/services/parliament-http/parliament-models.js';
 
+const LIMIT_CAP = 100;
+
 /** Select bill metadata, complete stage/publication records, or amendment/motion summaries and details. */
 export const ukparlGetBill = tool('ukparl_get_bill', {
   description:
@@ -52,7 +54,7 @@ export const ukparlGetBill = tool('ukparl_get_bill', {
       .min(1)
       .optional()
       .describe(
-        'Collection records; positive safe integer, default 20, effective cap 50; collections only.',
+        `Collection records; positive safe integer, default 20, cap ${LIMIT_CAP}; larger values are capped with a notice; collections only.`,
       ),
     contentCursor: optionalText(z.string().min(1)).describe(
       'Lossless same-selection content continuation.',
@@ -88,7 +90,11 @@ export const ukparlGetBill = tool('ukparl_get_bill', {
       .int()
       .optional()
       .describe('Actual whole records emitted or selected for lossless reconstruction.'),
-    cap: z.number().int().optional().describe('Effective per-call collection limit.'),
+    cap: z
+      .number()
+      .int()
+      .optional()
+      .describe('Collection page-size ceiling; a larger limit is clamped to it.'),
   },
   enrichmentTrailer: {
     applied: { render: enrichmentField('applied') },
@@ -175,7 +181,7 @@ export const ukparlGetBill = tool('ukparl_get_bill', {
       code: JsonRpcErrorCode.Conflict,
       when: 'The selected payload changed during content retrieval.',
       recovery:
-        'Repeat the same tool with its original filters and no contentCursor, then follow the new content cursors.',
+        'Repeat the same tool with its original filters and any collection cursor, but no contentCursor, then follow the new content cursors.',
       thrownBy: 'service',
     },
     {
@@ -185,11 +191,27 @@ export const ukparlGetBill = tool('ukparl_get_bill', {
       recovery: 'Wait briefly, then repeat ukparl_get_bill with the same selection.',
       thrownBy: 'service',
     },
+    {
+      reason: 'call_deadline_exceeded',
+      code: JsonRpcErrorCode.Timeout,
+      thrownBy: 'service',
+      when: 'The 45-second call deadline elapsed before the official API answered.',
+      recovery:
+        'Repeat ukparl_get_bill once after a short wait; if it times out again, lower limit or filter amendments by amendmentNumber, decision or memberId.',
+    },
+    {
+      reason: 'http_server_error',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      thrownBy: 'service',
+      when: 'The official API returned an HTTP 5xx server error.',
+      recovery:
+        'Repeat ukparl_get_bill with a lower limit or an amendmentNumber, decision or memberId filter on amendments; retry later if it still fails.',
+    },
   ],
   async handler(input, ctx) {
     using call = getParliamentHttp().beginCall(ctx);
     const collection = ['stages', 'publications', 'amendments', 'motions'].includes(input.section);
-    const limit = Math.min(input.limit ?? 20, 50);
+    const limit = Math.min(input.limit ?? 20, LIMIT_CAP);
     const capped = collection && (input.limit ?? 20) > limit;
     const applied = {
       billId: input.billId,
@@ -202,7 +224,10 @@ export const ukparlGetBill = tool('ukparl_get_bill', {
       source: 'bills' as const,
       ...(collection ? { limit } : {}),
     };
-    const result = await getBillsService().get(input, call);
+    const result = await getBillsService().get(
+      { ...input, ...(collection ? { limit } : {}) },
+      call,
+    );
     const notice = `${LICENCE_NOTICE}${capped ? ` Requested limit ${input.limit} is capped at ${limit}.` : ''}${result.payload.items?.length === 0 ? ` The source returned no items for ukparl_get_bill section=${input.section} with these parent identifiers.` : ''}`;
     return deliverPayload(result.payload, {
       tool: 'ukparl_get_bill',
@@ -224,7 +249,7 @@ export const ukparlGetBill = tool('ukparl_get_bill', {
         ...(selected.page?.total !== undefined ? { totalCount: selected.page.total } : {}),
         ...(capped ? { requestedLimit: input.limit } : {}),
         ...(selected.page?.hasMore
-          ? { truncated: true, shown: selected.page.returned, cap: limit }
+          ? { truncated: true, shown: selected.page.returned, cap: LIMIT_CAP }
           : {}),
       }),
       applyEnrichment: (values) => ctx.enrich(values),

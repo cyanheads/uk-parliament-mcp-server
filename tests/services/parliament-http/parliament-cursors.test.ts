@@ -42,18 +42,47 @@ describe('collection cursors', () => {
     });
   });
 
-  it('binds source, selector, filters and native size', () => {
+  it('binds source, selector and filters', () => {
     const token = encodeCursor(readCollectionCursor(undefined, binding));
     for (const changed of [
       { source: 'bills' },
       { selector: 'profile' },
       { filters: { memberId: '43', house: 'commons' } },
-      { nativePageSize: 10 },
     ]) {
       expect(() => readCollectionCursor(token, { ...binding, ...changed })).toThrow(
         expect.objectContaining({ data: expect.objectContaining({ reason: 'invalid_cursor' }) }),
       );
     }
+  });
+
+  it.each([10, 50])(
+    'resumes an offset cursor minted at limit 20 at its offset under limit %i',
+    (limit) => {
+      const offsetBinding = { ...binding, selector: 'interests' };
+      const token = advanceCollectionCursor(readCollectionCursor(undefined, offsetBinding), 20);
+      const resumed = readCollectionCursor(token, { ...offsetBinding, nativePageSize: limit });
+      expect(resumed).toMatchObject({ offset: 20, nativePageSize: limit });
+      expect(resumed).not.toHaveProperty('nativePage');
+      expect(
+        decodeCursor(advanceCollectionCursor(resumed, limit), CollectionCursorSchema),
+      ).toMatchObject({ offset: 20 + limit, nativePageSize: limit });
+    },
+  );
+
+  it('keeps the page-size binding on native-page cursors', () => {
+    const token = advanceCollectionCursor(
+      { ...readCollectionCursor(undefined, binding), nativePage: 1, intraPageOffset: 0 },
+      3,
+    );
+    expect(readCollectionCursor(token, binding)).toMatchObject({
+      offset: 3,
+      nativePage: 1,
+      intraPageOffset: 3,
+      nativePageSize: 20,
+    });
+    expect(() => readCollectionCursor(token, { ...binding, nativePageSize: 10 })).toThrow(
+      expect.objectContaining({ data: expect.objectContaining({ reason: 'invalid_cursor' }) }),
+    );
   });
 
   it('rejects malformed, unknown-key, unsupported and inconsistent cursors', () => {

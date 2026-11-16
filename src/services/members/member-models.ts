@@ -26,7 +26,8 @@ const chamber = z
 /** Source link metadata; relative hrefs remain source values, never request targets. */
 export const MemberLinkSchema = z
   .object({ rel: text, href: text, method: text })
-  .describe('Published relationship link; href may be relative.');
+  .describe('Published relationship link; href may be relative.')
+  .meta({ id: 'MemberLink' });
 /** Complete published party metadata, including sparse historical values. */
 export const PartySchema = z
   .object({
@@ -51,7 +52,7 @@ const StatusSchema = z
     statusStartDate: text,
   })
   .describe('Published membership status and its effective date.');
-/** Member profile; latest membership is not asserted to describe a historical date. */
+/** Member profile; an asOf search returns its latest* fields as they stood on that date. */
 export const MemberSchema = z
   .object({
     id: sourceId,
@@ -60,7 +61,7 @@ export const MemberSchema = z
     nameFullTitle: text,
     nameAddressAs: text,
     latestParty: PartySchema.nullish().describe(
-      'Latest source party, possibly unknown in historical results.',
+      'Source party: current on a profile or search, held on the date on an asOf search; possibly unknown in historical results.',
     ),
     gender: text,
     latestHouseMembership: z
@@ -76,7 +77,9 @@ export const MemberSchema = z
         membershipStatus: StatusSchema.nullish().describe('Latest source membership status.'),
       })
       .nullish()
-      .describe('Latest source membership, not a guaranteed as-of snapshot.'),
+      .describe(
+        'Source House membership: latest on a profile or search, the one held on the date on an asOf search.',
+      ),
     thumbnailUrl: text,
   })
   .describe('Complete published member metadata.');
@@ -329,6 +332,7 @@ export const CommitteeMemberSchema = z
         house: chamber,
         isCurrent: flag,
       })
+      .meta({ id: 'CommitteeMemberInfo' })
       .nullish()
       .describe('Member metadata; mnisId is the Members API join key.'),
     committees: z

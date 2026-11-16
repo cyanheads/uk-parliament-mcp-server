@@ -3,7 +3,6 @@
  * @module services/divisions/divisions-schemas
  */
 import { z } from '@cyanheads/mcp-ts-core';
-import { SourceSchema } from '../parliament-http/parliament-models.js';
 
 const text = z.string().nullish();
 const count = z.number().int().nonnegative().nullish();
@@ -122,10 +121,14 @@ export const VoterSchema = z
     lobby: LobbySchema.describe('Source lobby or explicitly not-recorded list.'),
     isTeller: z.boolean().describe('Member appears in this lobby teller list.'),
   })
-  .describe('One whole normalized voter or teller identity.');
+  .describe('One whole normalized voter or teller identity.')
+  .meta({ id: 'Voter' });
 /** One normalized whole voter row. */
 export type Voter = z.infer<typeof VoterSchema>;
-/** All meaningful division metadata; roster arrays are separately selected through voters mode. */
+/**
+ * All meaningful division metadata; roster arrays are separately selected through voters mode.
+ * `record` and `items[]` reference its single `$defs` entry.
+ */
 export const DivisionSchema = z
   .object({
     divisionId: z.string().describe('Division ID scoped to the accompanying House.'),
@@ -177,11 +180,13 @@ export const DivisionSchema = z
     detailLevel: z
       .enum(['summary', 'complete'])
       .describe('Search summary or selected complete metadata.'),
-    source: SourceSchema.describe('Actual official request provenance.'),
     sourceUrl: z.string().describe('Official public division page.'),
     rosterAvailableVia: z
       .literal('ukparl_search_divisions')
-      .describe('Use mode=voters with house and divisionId for complete roster rows.'),
+      .optional()
+      .describe(
+        'Complete detail only: use mode=voters with house and divisionId for complete roster rows.',
+      ),
     rosterSelectors: z
       .array(
         z
@@ -210,12 +215,21 @@ export const DivisionSchema = z
       ),
     headlineCountTreatment: z
       .string()
-      .describe('Source-specific official count semantics, separate from roster arithmetic.'),
+      .optional()
+      .describe(
+        'Complete detail only: source-specific official count semantics, separate from roster arithmetic.',
+      ),
     headlineCountExplanationUrl: z
       .string()
-      .describe('Official Parliament explanation of whether tellers are counted in each House.'),
+      .optional()
+      .describe(
+        'Complete detail only: official Parliament explanation of whether tellers are counted in each House.',
+      ),
   })
-  .describe('Normalized whole division metadata.');
+  .describe(
+    'Normalized whole division metadata; provenance is the payload source, once per response.',
+  )
+  .meta({ id: 'Division' });
 /** Normalized selected division or search summary. */
 export type Division = z.infer<typeof DivisionSchema>;
 /** Party totals contain only roster observations; unknown party stays null or absent. */

@@ -32,42 +32,54 @@ export const AmendmentDecisionSchema = z.enum([
   'AgreedOnDivision',
 ]);
 
-function models<T extends z.ZodType>(id: T, house: z.ZodType<string>) {
+function models<T extends z.ZodType>(id: T, house: z.ZodType<string>, defs = false) {
+  /** Public records name each shape reused across paths; an `outputSchema` emits it once in `$defs`. */
+  const shared = <S extends z.ZodType>(schema: S, name: string): S =>
+    defs ? schema.meta({ id: name }) : schema;
   const text = z.string().nullish();
   const integer = z.number().int().nullish();
-  const member = z
-    .object({
-      memberId: id.describe('Members API identifier.'),
-      name: text.describe('Published name.'),
-      party: text.describe('Party name.'),
-      partyColour: text.describe('Party colour.'),
-      house: house.nullish().describe('Source House.'),
-      memberPhoto: text.describe('Published photograph URL.'),
-      memberPage: text.describe('Published member URL.'),
-      memberFrom: text.describe('Constituency or membership basis.'),
-      sortOrder: integer.describe('Source order.'),
-      isLead: z.boolean().nullish().describe('Lead sponsor flag.'),
-    })
-    .describe('One published member sponsor.');
-  const sitting = z
-    .object({
-      id: id.describe('Sitting ID.'),
+  const member = shared(
+    z
+      .object({
+        memberId: id.describe('Members API identifier.'),
+        name: text.describe('Published name.'),
+        party: text.describe('Party name.'),
+        partyColour: text.describe('Party colour.'),
+        house: house.nullish().describe('Source House.'),
+        memberPhoto: text.describe('Published photograph URL.'),
+        memberPage: text.describe('Published member URL.'),
+        memberFrom: text.describe('Constituency or membership basis.'),
+        sortOrder: integer.describe('Source order.'),
+        isLead: z.boolean().nullish().describe('Lead sponsor flag.'),
+      })
+      .describe('One published member sponsor.'),
+    'BillMember',
+  );
+  const sitting = shared(
+    z
+      .object({
+        id: id.describe('Sitting ID.'),
+        stageId: id.nullish().describe('Reference stage ID.'),
+        billStageId: id.nullish().describe('Bill-specific stage ID.'),
+        billId: id.nullish().describe('Bill ID.'),
+        date: text.describe('Source sitting date.'),
+      })
+      .describe('One complete stage sitting.'),
+    'BillStageSitting',
+  );
+  const stage = shared(
+    z.object({
+      id: id.describe('Bill-specific stage occurrence ID.'),
       stageId: id.nullish().describe('Reference stage ID.'),
-      billStageId: id.nullish().describe('Bill-specific stage ID.'),
-      billId: id.nullish().describe('Bill ID.'),
-      date: text.describe('Source sitting date.'),
-    })
-    .describe('One complete stage sitting.');
-  const stage = z.object({
-    id: id.describe('Bill-specific stage occurrence ID.'),
-    stageId: id.nullish().describe('Reference stage ID.'),
-    sessionId: id.nullish().describe('Session ID.'),
-    description: text.describe('Stage description.'),
-    abbreviation: text.describe('Stage abbreviation.'),
-    house: house.nullish().describe('Source House including Unassigned.'),
-    stageSittings: z.array(sitting).nullish().describe('All supplied stage sittings.'),
-    sortOrder: integer.describe('Source stage order.'),
-  });
+      sessionId: id.nullish().describe('Session ID.'),
+      description: text.describe('Stage description.'),
+      abbreviation: text.describe('Stage abbreviation.'),
+      house: house.nullish().describe('Source House including Unassigned.'),
+      stageSittings: z.array(sitting).nullish().describe('All supplied stage sittings.'),
+      sortOrder: integer.describe('Source stage order.'),
+    }),
+    'BillStage',
+  );
   const committee = z.object({
     id: id.describe('Committee ID.'),
     name: text.describe('Committee name.'),
@@ -140,15 +152,18 @@ function models<T extends z.ZodType>(id: T, house: z.ZodType<string>) {
       .nullish()
       .describe('Published bill agent.'),
   });
-  const line = z
-    .object({
-      text: text.describe('Complete source text or HTML.'),
-      indentation: integer.describe('Source indentation.'),
-      hangingIndentation: text.describe('Numbered or hanging prefix.'),
-      isImage: z.boolean().nullish().describe('Image flag.'),
-      imageType: text.describe('Image format.'),
-    })
-    .describe('One complete amendment text line.');
+  const line = shared(
+    z
+      .object({
+        text: text.describe('Complete source text or HTML.'),
+        indentation: integer.describe('Source indentation.'),
+        hangingIndentation: text.describe('Numbered or hanging prefix.'),
+        isImage: z.boolean().nullish().describe('Image flag.'),
+        imageType: text.describe('Image format.'),
+      })
+      .describe('One complete amendment text line.'),
+    'BillAmendmentLine',
+  );
   const decision = z.object({
     id: id.describe('Generic source ID; amendment summaries may use zero.'),
     billId: id.nullish().describe('Parent bill ID.'),
@@ -217,18 +232,21 @@ function models<T extends z.ZodType>(id: T, house: z.ZodType<string>) {
           : item.type === 'Amendment' && item.amendment != null && item.motion == null,
       'Ping-pong type must identify exactly one populated branch.',
     );
-  const normalizedGroup = z
-    .object({
-      text: z.array(line).nullish().describe('Complete group text.'),
-      sortOrder: integer.describe('Source group order.'),
-      amendmentIndices: z
-        .array(z.number().int().nonnegative().describe('Index into relatedAmendments.'))
-        .nullish()
-        .describe(
-          'Related amendment indices in original order; preserves null or absent collections.',
-        ),
-    })
-    .describe('One complete group with explicit related amendment associations.');
+  const normalizedGroup = shared(
+    z
+      .object({
+        text: z.array(line).nullish().describe('Complete group text.'),
+        sortOrder: integer.describe('Source group order.'),
+        amendmentIndices: z
+          .array(z.number().int().nonnegative().describe('Index into relatedAmendments.'))
+          .nullish()
+          .describe(
+            'Related amendment indices in original order; preserves null or absent collections.',
+          ),
+      })
+      .describe('One complete group with explicit related amendment associations.'),
+    'BillMotionGroup',
+  );
   const normalizedMotion = motionSummary.extend({
     itemKind: z.string().describe('Original Motion or Amendment wrapper type.'),
     motionGroups: z.array(normalizedGroup).nullish().describe('Complete motion groups.'),
@@ -318,7 +336,7 @@ function models<T extends z.ZodType>(id: T, house: z.ZodType<string>) {
 /** Raw API schemas tolerate new properties while validating every retained field. */
 export const RawBills = models(z.number().int().nonnegative().max(2147483647), z.string());
 /** Public records use decimal string IDs and retain every supplied House value. */
-export const Bills = models(z.string().regex(/^[0-9]+$/), z.string());
+export const Bills = models(z.string().regex(/^[0-9]+$/), z.string(), true);
 /** Normalize only declared identifier/House fields, preserving text, nulls and zero source IDs. */
 export function normalizeBillValue(value: unknown, key = ''): unknown {
   if (Array.isArray(value))
@@ -419,15 +437,14 @@ const LegislationHandoffSchema = z.object({
     .describe('Actual authoritative statute links.'),
   reason: z.string().optional().describe('Why an authoritative link is unavailable.'),
 });
-/** Bill summary with provenance and explicit completeness. */
+/** Bill summary with explicit completeness; request provenance is carried once by the search page. */
 export const BillHitSchema = Bills.bill
   .extend({
-    source: SourceSchema.describe('Official request provenance.'),
     detailLevel: z
       .literal('summary')
       .describe('Search summary; retrieve selected detail separately.'),
   })
-  .describe('One bill summary and its provenance.');
+  .describe('One bill summary.');
 /** All typed selected Bills records. */
 const BillRecordSchema = z.union([
   Bills.billDetail.strict().describe('Complete bill overview.'),
@@ -435,10 +452,18 @@ const BillRecordSchema = z.union([
   Bills.amendmentDetail.strict().describe('Complete amendment detail.'),
   Bills.normalizedMotion.strict().describe('Complete ping-pong item with its source wrapper type.'),
 ]);
+/**
+ * `Bills.stage.strict()`, cloned with its parent link so the item emits as a `$ref` to the
+ * `currentStage` definition. Output-only: output JSON Schema is closed for both variants alike.
+ */
+const StrictStageSchema = Bills.stage.clone(
+  { ...Bills.stage.def, catchall: z.never() },
+  { parent: true },
+);
 /** All typed selected Bills collection rows. */
 const BillItemSchema = z
   .union([
-    Bills.stage.strict().describe('One stage occurrence.'),
+    StrictStageSchema.describe('One stage occurrence.'),
     Bills.publication.strict().describe('One complete publication.'),
     Bills.amendment.strict().describe('One amendment summary.'),
     Bills.motionSummary

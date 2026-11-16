@@ -2,7 +2,8 @@
  * @fileoverview Independent reconstruction of bounded Parliament content pages.
  * @module tests/services/parliament-http/parliament-delivery.test
  */
-import { describe, expect, it } from 'vitest';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { describe, expect, it, vi } from 'vitest';
 import {
   ContentCursorSchema,
   decodeCursor,
@@ -21,18 +22,35 @@ const selection = { memberId: '42', section: 'interests', limit: 20 };
 const enrichment = { applied: selection, notice: 'Contains Parliamentary information.' };
 const options = { tool: 'ukparl_get_member', selection, enrichment };
 
+/** Whole-record pages over `rows` from `offset`, continuing after the emitted count. */
+function pageOver<R>(rows: R[], offset = 0) {
+  return (count: number) => {
+    const end = offset + count;
+    return {
+      items: rows.slice(offset, end),
+      page: {
+        returned: count,
+        hasMore: end < rows.length,
+        ...(end < rows.length ? { nextCursor: `offset-${end}` } : {}),
+      },
+    };
+  };
+}
+
+/** Both surfaces carry the value; outline and fragment replies also fit 24,000 bytes. */
 function assertSurfaces(value: object): void {
   const content = formatData(value);
   content.push(...formatData(enrichment));
-  expect(
-    Buffer.byteLength(
-      JSON.stringify({
-        jsonrpc: '2.0',
-        id: Number.MAX_SAFE_INTEGER,
-        result: { structuredContent: { ...value, ...enrichment }, content },
-      }),
-    ),
-  ).toBeLessThanOrEqual(24_000);
+  if (Reflect.get(value, 'delivery') !== 'full')
+    expect(
+      Buffer.byteLength(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: Number.MAX_SAFE_INTEGER,
+          result: { structuredContent: { ...value, ...enrichment }, content },
+        }),
+      ),
+    ).toBeLessThanOrEqual(24_000);
   const text = content.map((block) => block.text).join('\n');
   // Decode the complete JSON blocks independently of the renderer.
   const encoded = [...text.matchAll(/(`{3,})json\n([^\n]*)\n\1/g)].map((match) =>
@@ -127,6 +145,47 @@ describe('lossless content delivery', () => {
         collection: { count: 2, repage: (count) => ({ items: items.slice(0, count) }) },
       }),
     ).toEqual([items[0]]);
+  });
+  it.each([
+    ['limit 1, same page', 1],
+    ['limit 3, larger page', 3],
+  ])('resolves a 0.1.2 scalar fragment cursor minted for the first record (%s)', (_name, limit) => {
+    const items = Array.from({ length: 3 }, (_, id) => ({
+      id: `c${id}`,
+      text: `${id}:${'é'.repeat(6000)}`,
+    }));
+    const repage = (count: number) => ({
+      items: items.slice(0, count),
+      page: { returned: count, hasMore: count < items.length },
+    });
+    const deliveryOptions = { ...options, collection: { count: limit, repage } };
+    // 0.1.2 outlined this ~12 KB record alone and continued its text at offset 5499.
+    const contentCursor = encodeCursor({
+      v: 1,
+      binding: digest({ tool: options.tool, selection }),
+      revision: digest(repage(1), true),
+      path: '/items/0/text',
+      arm: 'fragment',
+      offset: 5499,
+    });
+    const expected = JSON.stringify(items[0]!.text);
+    let encoded = '';
+    let cursor: string | undefined = contentCursor;
+    do {
+      const next = deliverPayload(repage(limit), {
+        ...deliveryOptions,
+        contentCursor: cursor,
+      }) as ContentDelivery;
+      assertSurfaces(next);
+      expect(next.delivery).toBe('fragment');
+      expect(next.contentPage).toMatchObject({
+        path: '/items/0/text',
+        offset: 5499 + encoded.length,
+      });
+      encoded += next.contentPage.fragment;
+      cursor = next.contentPage.nextCursor;
+    } while (cursor);
+    expect(encoded).toBe(expected.slice(5499));
   });
   it('renders a complete record in one reversible JSON block with clickable source links', () => {
     const payload = {
@@ -309,6 +368,20 @@ describe('lossless content delivery', () => {
       }),
     ).toEqual(payload);
   });
+  it('serializes only the selected subtree on a single-payload content-cursor call', () => {
+    const payload = { record: { id: '42', text: 'x'.repeat(30_000), more: 'y'.repeat(30_000) } };
+    const outline = deliverPayload(payload, options) as ContentDelivery;
+    const child = outline.contentPage.entries?.find((entry) => entry.jsonValue === undefined);
+    expect(child?.path).toBe('/record');
+    const stringify = vi.spyOn(JSON, 'stringify');
+    try {
+      const next = deliverPayload(payload, { ...options, contentCursor: child?.contentCursor });
+      expect(next.delivery).toBe('outline');
+      expect(stringify.mock.calls.filter(([value]) => value === payload)).toHaveLength(0);
+    } finally {
+      stringify.mockRestore();
+    }
+  });
   it('reconstructs nested arrays, many descriptors, pointers and escaped Unicode scalars', () => {
     const text = '🦊漢字\n"quoted"\\<p>source</p>```'.repeat(1500);
     const payload = {
@@ -332,31 +405,135 @@ describe('lossless content delivery', () => {
     expect(reconstruct(payload)).toEqual(payload);
   });
 
-  it('reduces an ordinary page to whole items and reports the actual emitted count', () => {
-    const items = Array.from({ length: 20 }, (_, id) => ({
-      id: String(id),
-      text: 'é'.repeat(900),
-    }));
-    const result = deliverPayload(
-      { items, page: { returned: 20, hasMore: false } },
-      {
+  it.each([20, 100])(
+    'returns all %i requested whole records however large the combined page',
+    (limit) => {
+      const rows = Array.from({ length: 100 }, (_, id) => ({
+        id: String(id),
+        text: 'é'.repeat(2500),
+      }));
+      const repage = pageOver(rows);
+      const result = deliverPayload(repage(limit), {
         ...options,
-        collection: {
-          count: 20,
-          repage: (count) => ({
-            items: items.slice(0, count),
-            page: { returned: count, hasMore: count < 20 },
-          }),
+        collection: { count: limit, repage },
+      });
+      expect(result).toEqual({
+        delivery: 'full',
+        items: rows.slice(0, limit),
+        page: {
+          returned: limit,
+          hasMore: limit < 100,
+          ...(limit < 100 ? { nextCursor: `offset-${limit}` } : {}),
         },
-      },
-    );
+      });
+      expect(Buffer.byteLength(JSON.stringify(result))).toBeGreaterThan(limit * 5000);
+      assertSurfaces(result);
+    },
+  );
+
+  it('stops a page before an oversized record, then serves that record alone as an exact outline', () => {
+    // Two 8 KB records exceed a 24,000-byte reply together but are each far under the limit.
+    const rows = [
+      { id: 'a', text: 'é'.repeat(4000) },
+      { id: 'b', text: 'è'.repeat(4000) },
+      { id: 'big', text: '🦊"<p>\n'.repeat(5000) },
+      { id: 'c', text: 'small c' },
+    ];
+    expect(Buffer.byteLength(JSON.stringify(rows[2]))).toBeGreaterThan(24_000);
+    const first = pageOver(rows);
+    expect(
+      deliverPayload(first(4), { ...options, collection: { count: 4, repage: first } }),
+    ).toEqual({
+      delivery: 'full',
+      items: rows.slice(0, 2),
+      page: { returned: 2, hasMore: true, nextCursor: 'offset-2' },
+    });
+    const second = pageOver(rows, 2);
+    const secondOptions = {
+      ...options,
+      selection: { ...selection, cursor: 'offset-2' },
+      collection: { count: 2, repage: second },
+    };
+    const outline = deliverPayload(second(2), secondOptions);
+    expect(outline.delivery).toBe('outline');
+    expect(reconstruct(second(2), undefined, secondOptions)).toEqual({
+      items: [rows[2]],
+      page: { returned: 1, hasMore: true, nextCursor: 'offset-3' },
+    });
+    const third = pageOver(rows, 3);
+    expect(
+      deliverPayload(third(1), { ...options, collection: { count: 1, repage: third } }),
+    ).toEqual({ delivery: 'full', items: [rows[3]], page: { returned: 1, hasMore: false } });
+  });
+
+  it.each([
+    ['exactly 24,000 bytes', 'é'.repeat(11_990), 24_000, 3],
+    ['24,001 bytes', `${'é'.repeat(11_990)}a`, 24_001, 1],
+  ])('sizes a collection record in UTF-8 bytes: %s', (_name, text, bytes, returned) => {
+    const rows = [
+      { id: 'a', text: 'small' },
+      { id: 'r', text },
+      { id: 'c', text: 'small' },
+    ];
+    expect(Buffer.byteLength(JSON.stringify(rows[1]))).toBe(bytes);
+    // About half as many UTF-16 code units, so a code-unit count would keep this record.
+    expect(JSON.stringify(rows[1]).length).toBeLessThan(12_100);
+    const repage = pageOver(rows);
+    expect(deliverPayload(repage(3), { ...options, collection: { count: 3, repage } })).toEqual({
+      ...repage(returned),
+      delivery: 'full',
+    });
+  });
+
+  it.each([
+    ['a 15,000-byte payload', 'x'.repeat(14_989), 15_000, 'full'],
+    ['exactly 24,000 bytes', `${'é'.repeat(11_994)}a`, 24_000, 'full'],
+    ['24,001 bytes', `${'é'.repeat(11_994)}ab`, 24_001, 'outline'],
+  ])('delivers a single payload by its own UTF-8 JSON size: %s', (_name, text, bytes, delivery) => {
+    const payload = { text };
+    expect(Buffer.byteLength(JSON.stringify(payload))).toBe(bytes);
+    const result = deliverPayload(payload, options);
+    expect(result.delivery).toBe(delivery);
     assertSurfaces(result);
-    expect(result.delivery).toBe('full');
-    if (result.delivery !== 'full') throw new Error('Expected a whole-item page.');
-    expect(result.items.length).toBeGreaterThan(0);
-    expect(result.items.length).toBeLessThan(20);
-    expect(result.items).toEqual(items.slice(0, result.page.returned));
-    expect(result.page.hasMore).toBe(true);
+    expect(reconstruct(payload)).toEqual(payload);
+  });
+
+  it('finds the record array by its growth, nested and beside a fixed one-element array', () => {
+    // A 13 KB first voter is whole; the 30 KB second one is oversized.
+    const voters = [
+      { id: 'v1', name: 'é'.repeat(6500) },
+      { id: 'v2', name: 'x'.repeat(30_000) },
+    ];
+    const repageFrom =
+      (offset: number) =>
+      (count: number): object => ({
+        sources: ['https://example.test/one'],
+        data: {
+          house: 'commons',
+          // Some pages omit the record array when it is empty.
+          ...(count ? { voters: voters.slice(offset, offset + count) } : {}),
+        },
+        page: { returned: count },
+      });
+    const first = repageFrom(0);
+    expect(
+      deliverPayload(first(2), { ...options, collection: { count: 2, repage: first } }),
+    ).toEqual({ ...first(1), delivery: 'full' });
+    const second = repageFrom(1);
+    const secondOptions = { ...options, collection: { count: 1, repage: second } };
+    expect(deliverPayload(second(1), secondOptions).delivery).toBe('outline');
+    expect(reconstruct(second(1), undefined, secondOptions)).toEqual(second(1));
+  });
+
+  it('fails loudly when a repage grows no record array or several', () => {
+    const rows = [{ id: 'a' }, { id: 'b' }];
+    for (const repage of [
+      (count: number) => ({ count }),
+      (count: number) => ({ items: rows.slice(0, count), copy: rows.slice(0, count) }),
+    ])
+      expect(() =>
+        deliverPayload(repage(2), { ...options, collection: { count: 2, repage } }),
+      ).toThrow(expect.objectContaining({ code: JsonRpcErrorCode.InternalError }));
   });
 
   it('outlines only the oversized first item while retaining collection continuation', () => {

@@ -17,13 +17,8 @@ import {
   page,
   withFullMembersQueue,
 } from '../services/members/members-fixtures.js';
+import { renderedPayload, text } from './rendered-payload.js';
 
-function text(result: Awaited<ReturnType<typeof runToolContract>>) {
-  return result.content
-    .filter((block) => block.type === 'text')
-    .map((block) => block.text)
-    .join('\n');
-}
 afterEach(() => {
   disposeMembers();
   disposeParliamentHttp();
@@ -41,11 +36,15 @@ describe('ukparl_search_members', () => {
     expect(result.isError).not.toBe(true);
     expect(result.structuredContent).toMatchObject({
       mode: 'search',
-      items: [
-        { memberId: '77', nameDisplayAs: 'Synthetic Member', source: { url: requests[0]!.href } },
-      ],
+      items: [{ memberId: '77', nameDisplayAs: 'Synthetic Member' }],
+      source: { url: requests[0]!.href },
       page: { returned: 1, total: 1, hasMore: false },
     });
+    // Provenance is carried once by the payload, never repeated on each summary hit.
+    expect(Reflect.get(result.structuredContent!, 'items')[0]).not.toHaveProperty('source');
+    const rendered = renderedPayload(text(result));
+    expect(rendered).toMatchObject({ source: { url: requests[0]!.href } });
+    expect((rendered.items as object[])[0]).not.toHaveProperty('source');
     for (const value of ['Synthetic Member', '77', requests[0]!.href, 'retrievedAt', 'licenceUrl'])
       expect(text(result)).toContain(value);
   });
@@ -78,6 +77,28 @@ describe('ukparl_search_members', () => {
       );
     });
   });
+  it('renders an upstream 5xx and declares the call deadline with exact-tool recovery', async () => {
+    installMembers(() => new Response('', { status: 501 }));
+    const result = await runToolContract(ukparlSearchMembers, {});
+    const hint = ukparlSearchMembers.errors?.find(
+      (entry) => entry.reason === 'http_server_error',
+    )?.recovery;
+    expect(hint).toContain('ukparl_search_members');
+    expect(result.structuredContent).toMatchObject({
+      // -32000 ServiceUnavailable
+      error: { code: -32000, data: { reason: 'http_server_error', recovery: { hint } } },
+    });
+    expect(text(result)).toContain('http_server_error');
+    expect(text(result)).toContain(hint);
+    expect(ukparlSearchMembers.errors).toContainEqual(
+      expect.objectContaining({
+        reason: 'call_deadline_exceeded',
+        code: -32004, // Timeout
+        thrownBy: 'service',
+        recovery: expect.stringContaining('ukparl_search_members'),
+      }),
+    );
+  });
   it('preserves sparse historical membership and full provenance on both surfaces', async () => {
     const requests = installMembers(() => page([member()]));
     const result = await runToolContract(ukparlSearchMembers, {
@@ -85,20 +106,19 @@ describe('ukparl_search_members', () => {
       name: ' Synthetic ',
     });
     expect(result.isError).not.toBe(true);
+    // Every as-of field is named: names, latestParty and latestHouseMembership all reflect asOf.
+    const asOfNotice =
+      'latestParty, latestHouseMembership and names are as they stood on asOf, not current values';
     expect(result.structuredContent).toMatchObject({
       mode: 'historical',
       query: { asOf: '2001-01-01', name: 'Synthetic', currentOnly: false },
-      items: [
-        {
-          memberId: '77',
-          latestParty: null,
-          latestHouseMembership: null,
-          source: { url: requests[0]!.href },
-        },
-      ],
+      items: [{ memberId: '77', latestParty: null, latestHouseMembership: null }],
+      source: { url: requests[0]!.href },
+      notice: expect.stringContaining(asOfNotice),
     });
     for (const value of [
       'historical',
+      asOfNotice,
       '2001-01-01',
       'latestHouseMembership',
       'null',
@@ -177,9 +197,10 @@ describe('ukparl_search_members', () => {
     expect(text(result)).toContain('currentOnly=false');
     expect(text(result)).toContain('capped at 20');
     expect(requests[0]!.searchParams.has('IsCurrentMember')).toBe(false);
+    expect(requests[0]!.searchParams.get('take')).toBe('20');
   });
-  it('pages UTF-8 whole records by actual emitted counts without duplicates', async () => {
-    const rows = Array.from({ length: 6 }, (_, i) => member(77 + i, `${i} ${'文🏛️'.repeat(250)}`));
+  it('pages min(limit, cap) UTF-8 whole records and resumes under changed limits without duplicates', async () => {
+    const rows = Array.from({ length: 6 }, (_, i) => member(77 + i, `${i} ${'文🏛️'.repeat(400)}`));
     const requests = installMembers((url) =>
       page(
         rows.slice(
@@ -191,35 +212,51 @@ describe('ukparl_search_members', () => {
     );
     const ids: string[] = [];
     let cursor: string | undefined;
-    do {
+    for (const [limit, returned] of [
+      [4, 4],
+      [1, 1],
+      [20, 1],
+    ] as const) {
       const result = await runToolContract(ukparlSearchMembers, {
-        limit: 6,
+        limit,
         ...(cursor ? { cursor } : {}),
       });
       expect(result.isError).not.toBe(true);
-      expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(24000);
+      // The page is sized by limit alone, even when the whole reply exceeds 24,000 bytes.
+      if (returned === 4) expect(Buffer.byteLength(JSON.stringify(result))).toBeGreaterThan(24000);
       const output = ukparlSearchMembers.output.parse(result.structuredContent);
       expect(output.delivery).toBe('full');
       expect(requests.at(-1)!.searchParams.get('skip')).toBe(String(ids.length));
+      expect(requests.at(-1)!.searchParams.get('take')).toBe(String(limit));
+      // cap is the mode ceiling, independent of the effective limit in applied.limit.
+      expect(result.structuredContent).toMatchObject({
+        page: { returned, total: 6 },
+        applied: { limit },
+        shown: returned,
+        cap: 20,
+      });
       for (const row of output.items!) {
         ids.push(row.memberId);
         expect(text(result)).toContain(JSON.stringify(row.nameDisplayAs));
       }
       cursor = output.page!.nextCursor;
-    } while (cursor);
+    }
+    expect(cursor).toBeUndefined();
     expect(ids).toEqual(['77', '78', '79', '80', '81', '82']);
-    expect(requests.length).toBeGreaterThan(1);
   });
   it('rejects malformed and rebound cursors with recovery on both surfaces', async () => {
     installMembers(() => page([member()], 2));
     const first = await runToolContract(ukparlSearchMembers, { limit: 1 });
     const cursor = ukparlSearchMembers.output.parse(first.structuredContent).page!.nextCursor!;
+    // The tool's own declared recovery, not a generic throw-site hint, reaches both surfaces.
+    const hint =
+      'Repeat ukparl_search_members with the same filters and no cursor or contentCursor to restart.';
     for (const input of [{ cursor: 'bad!' }, { cursor, limit: 1, name: 'changed' }]) {
       const result = await runToolContract(ukparlSearchMembers, input);
       expect(result.structuredContent).toMatchObject({
-        error: { data: { reason: 'invalid_cursor' } },
+        error: { data: { reason: 'invalid_cursor', recovery: { hint } } },
       });
-      expect(text(result)).toContain('no cursor or contentCursor');
+      expect(text(result)).toContain(hint);
     }
   });
   it('handles a valid offset beyond the source end without inferring more records', async () => {
@@ -259,9 +296,11 @@ describe('ukparl_search_members', () => {
     expect(text(rebound)).toContain('no cursor or contentCursor');
     name = 'Changed synthetic';
     const changed = await runToolContract(ukparlSearchMembers, { contentCursor: cursor });
+    const hint =
+      'Repeat ukparl_search_members with original filters and any collection cursor, but no contentCursor, then follow the new content cursors.';
     expect(changed.structuredContent).toMatchObject({
-      error: { data: { reason: 'source_changed' } },
+      error: { data: { reason: 'source_changed', recovery: { hint } } },
     });
-    expect(text(changed)).toContain('original filters');
+    expect(text(changed)).toContain(hint);
   });
 });

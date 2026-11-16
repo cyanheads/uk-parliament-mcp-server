@@ -3,6 +3,7 @@
  * @module services/committees/committees-service
  */
 import { z } from '@cyanheads/mcp-ts-core';
+import { validationError } from '@cyanheads/mcp-ts-core/errors';
 import {
   getParliamentHttp,
   type ParliamentCall,
@@ -68,7 +69,7 @@ export const CommitteePublicationSortSchema = z.enum([
   'ResponseDateAscending',
   'ResponseDateDescending',
 ]);
-/** Source business filters; false acceptingEvidence leaves upstream results unrestricted. */
+/** Source business filters; callers send acceptingEvidence only as true, since the source ignores false. */
 export interface CommitteeBusinessFilters {
   acceptingEvidence?: boolean | undefined;
   openedFrom?: string | undefined;
@@ -83,7 +84,28 @@ export interface CommitteePublicationFilters {
   publishedTo?: string | undefined;
   sortOrder?: z.infer<typeof CommitteePublicationSortSchema> | undefined;
 }
-/** Fixed-route adapters; no evidence documents are downloaded. */
+/** Document-route envelope; only the base64 file bytes are read, the rest repeats file metadata. */
+const DocumentEnvelopeSchema = z.object({
+  data: z.string().describe('Base64-encoded file bytes.'),
+});
+/** Strict base64 (canonical round trip) of UTF-8 text; a BOM and every character stay verbatim. */
+function decodeHtml(data: string): string {
+  const bytes = Buffer.from(data, 'base64');
+  if (bytes.toString('base64') !== data)
+    throw validationError('Committee document data is not canonical base64.', {
+      retryable: false,
+    });
+  try {
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch (cause) {
+    throw validationError(
+      'Committee document Html is not valid UTF-8.',
+      { retryable: false },
+      { cause },
+    );
+  }
+}
+/** Fixed-route adapters; only evidence_document reads a file, the evidence Html rendition. */
 export class CommitteesService {
   private readonly http: ParliamentHttpService;
   constructor(http: ParliamentHttpService) {
@@ -214,7 +236,10 @@ export class CommitteesService {
     };
   }
 
-  /** Publication metadata includes all types; a null file URL stays null. */
+  /**
+   * Publication metadata includes all types; a null file URL stays null. Items omit the committee,
+   * which every row of one committee's list repeats; mode=publication keeps it.
+   */
   async publications(
     call: ParliamentCall,
     committeeId: string,
@@ -259,7 +284,10 @@ export class CommitteesService {
       data: {
         ...response.data,
         itemsState: response.data.items === null ? ('null' as const) : ('present' as const),
-        items: response.data.items?.map(normalizePublication) ?? [],
+        items:
+          response.data.items?.map((item) =>
+            normalizePublication({ ...item, committee: undefined }),
+          ) ?? [],
       },
     };
   }
@@ -270,7 +298,11 @@ export class CommitteesService {
     ]);
   }
 
-  /** Page one business's website-visible written submissions or oral sessions. */
+  /**
+   * Page one business's website-visible written submissions or oral sessions. Written items omit the
+   * committees and business every row repeats; oral items keep theirs, since one session can cover
+   * several businesses.
+   */
   evidence(
     call: ParliamentCall,
     evidenceType: EvidenceType,
@@ -306,8 +338,36 @@ export class CommitteesService {
       };
     };
     return evidenceType === 'written'
-      ? fetch('/api/WrittenEvidence', WrittenEvidenceRawSchema, normalizeWrittenEvidence)
+      ? fetch('/api/WrittenEvidence', WrittenEvidenceRawSchema, (item) =>
+          normalizeWrittenEvidence({
+            ...item,
+            committees: undefined,
+            committeeBusiness: undefined,
+          }),
+        )
       : fetch('/api/OralEvidence', OralEvidenceRawSchema, normalizeOralEvidence);
+  }
+  /**
+   * The evidence record, then its own published Html rendition decoded verbatim. Only the record
+   * decides a miss: no listed Html file or a document 404 leaves `document` undefined.
+   */
+  async evidenceDocument(call: ParliamentCall, evidenceType: EvidenceType, evidenceId: string) {
+    const record = await this.evidenceDetail(call, evidenceType, evidenceId);
+    if (!record) return;
+    // The evidence's own document only; nested business reports list publication files.
+    const route = record.data.entities.flatMap((node) =>
+      node.kind === 'DocumentFile' &&
+      node.fileDataFormat === 'Html' &&
+      node.sourcePath.startsWith('/document/files/') &&
+      node.apiRoute !== undefined
+        ? [node.apiRoute]
+        : [],
+    )[0];
+    const response = route ? await this.singular(call, route, DocumentEnvelopeSchema) : undefined;
+    return {
+      ...record,
+      document: response && { html: decodeHtml(response.data.data), source: response.source },
+    };
   }
   /** A missing evidence detail is a successful namespace-specific miss. */
   async evidenceDetail(call: ParliamentCall, evidenceType: EvidenceType, evidenceId: string) {

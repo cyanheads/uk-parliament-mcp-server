@@ -1,5 +1,5 @@
 /**
- * @fileoverview Spoken Hansard contracts, byte-fit paging and lossless content retrieval.
+ * @fileoverview Spoken Hansard contracts, limit-sized paging and lossless content retrieval.
  * @module tests/tools/ukparl-search-hansard.test
  */
 
@@ -19,27 +19,32 @@ import {
   initParliamentHttp,
 } from '@/services/parliament-http/parliament-http-service.js';
 import { contribution, installHansard, spoken } from '../services/hansard/hansard-fixtures.js';
-import { renderedPayload } from './rendered-payload.js';
+import { renderedPayload, text } from './rendered-payload.js';
 
 type Result = Awaited<ReturnType<typeof runToolContract>>;
 type Output = ReturnType<typeof ukparlSearchHansard.output.parse>;
-function text(result: Result) {
-  return result.content
-    .filter((block) => block.type === 'text')
-    .map((block) => block.text)
-    .join('\n');
-}
 function output(result: Result): Output {
   expect(result.isError).not.toBe(true);
-  expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(24_000);
   const value = ukparlSearchHansard.output.parse(result.structuredContent);
+  // Full pages are sized by limit; outline and fragment replies keep fitting the content budget.
+  if (value.delivery !== 'full')
+    expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(24_000);
   expect(renderedPayload(text(result))).toEqual(result.structuredContent);
   return value;
 }
-function error(result: Result, reason: string) {
+/** Serve a consistent synthetic collection by the requested skip/take window. */
+function windowed(rows: unknown[]) {
+  return (url: URL) => {
+    const skip = Number(url.searchParams.get('queryParameters.skip'));
+    const take = Number(url.searchParams.get('queryParameters.take'));
+    return spoken(rows.slice(skip, skip + take), rows.length);
+  };
+}
+/** `hint`, when given, is the tool's own declared recovery, which no throw-site hint may replace. */
+function error(result: Result, reason: string, hint?: string) {
   expect(result.isError).toBe(true);
   expect(result.structuredContent).toMatchObject({
-    error: { data: { reason, recovery: { hint: expect.any(String) } } },
+    error: { data: { reason, recovery: { hint: hint ?? expect.any(String) } } },
   });
   const structured = result.structuredContent as {
     error: { data: { recovery: { hint: string } } };
@@ -120,7 +125,7 @@ describe('ukparl_search_hansard', () => {
   it.each([-1, -2, -2147483648, '-1', '-27', 0, '0'])(
     'preserves source speaker sentinel %j without exposing a Members join on either surface',
     async (MemberId) => {
-      const requests = installHansard(() => spoken([{ ...contribution(), MemberId }], 2));
+      installHansard(() => spoken([{ ...contribution(), MemberId }], 2));
       const result = await runToolContract(ukparlSearchHansard, {
         startDate: '1803-11-22',
         endDate: '1803-11-22',
@@ -134,11 +139,6 @@ describe('ukparl_search_hansard', () => {
         attributedTo: '  Attribution  ',
         text: ' <p>Complete 1 &amp; source\n"文🏛️"</p> ',
         preview: 'Preview only…',
-        source: {
-          url: requests[0]!.href,
-          retrievedAt: expect.any(String),
-          licenceUrl: expect.any(String),
-        },
       });
       expect(value.page).toMatchObject({
         returned: 1,
@@ -231,6 +231,135 @@ describe('ukparl_search_hansard', () => {
     },
   );
 
+  it.each(['SittingDateAsc', 'SittingDateDesc'] as const)(
+    'sends sortOrder %s as queryParameters.orderBy beside every filter and echoes it on both surfaces',
+    async (sortOrder) => {
+      const requests = installHansard(() => spoken([contribution()]));
+      const result = await runToolContract(ukparlSearchHansard, {
+        query: 'Synthetic',
+        memberId: '42',
+        house: 'commons',
+        startDate: '2005-01-01',
+        endDate: '2005-01-31',
+        debateSectionId: '123',
+        sortOrder,
+      });
+      output(result);
+      expect(Object.fromEntries(requests[0]!.searchParams)).toEqual({
+        'queryParameters.searchTerm': 'Synthetic',
+        'queryParameters.memberId': '42',
+        'queryParameters.house': 'Commons',
+        'queryParameters.startDate': '2005-01-01',
+        'queryParameters.endDate': '2005-01-31',
+        'queryParameters.debateSectionId': '123',
+        'queryParameters.orderBy': sortOrder,
+        'queryParameters.skip': '0',
+        'queryParameters.take': '5',
+        'queryParameters.outputType': 'List',
+      });
+      expect(result.structuredContent).toMatchObject({ applied: { sortOrder } });
+      expect(renderedPayload(text(result))).toMatchObject({ applied: { sortOrder } });
+    },
+  );
+
+  it('sends no orderBy and echoes no sortOrder when sortOrder is omitted or blank', async () => {
+    const requests = installHansard(() => spoken([contribution()]));
+    for (const input of [{}, { sortOrder: '' }]) {
+      const result = await runToolContract(ukparlSearchHansard, input);
+      output(result);
+      expect(requests.at(-1)!.searchParams.has('queryParameters.orderBy')).toBe(false);
+      const wire = JSON.parse(JSON.stringify(result.structuredContent)) as { applied: object };
+      expect(wire.applied).not.toHaveProperty('sortOrder');
+      expect(renderedPayload(text(result)).applied).not.toHaveProperty('sortOrder');
+    }
+  });
+
+  it.each(['Relevance', 'sittingdateasc', 'SittingDate'])(
+    'rejects unknown sortOrder %s before I/O',
+    async (sortOrder) => {
+      const requests = installHansard(() => spoken([]));
+      const result = await runToolContract(ukparlSearchHansard, { sortOrder });
+      expect(result.structuredContent).toMatchObject({
+        error: { code: JsonRpcErrorCode.InvalidParams },
+      });
+      expect(text(result)).toContain('sortOrder');
+      expect(text(result)).toContain('SittingDateAsc');
+      expect(requests).toEqual([]);
+    },
+  );
+
+  it('carries request provenance once at payload level, including empty pages', async () => {
+    const requests = installHansard((url) =>
+      spoken(
+        url.searchParams.has('queryParameters.searchTerm') ? [] : [contribution(), contribution(2)],
+      ),
+    );
+    for (const input of [{}, { query: 'nothing' }]) {
+      const result = await runToolContract(ukparlSearchHansard, input);
+      const value = output(result);
+      expect(value.source).toMatchObject({
+        api: 'hansard',
+        url: requests.at(-1)!.href,
+        retrievedAt: expect.any(String),
+        licenceUrl: expect.any(String),
+      });
+      for (const item of value.items!) expect(item).not.toHaveProperty('source');
+      expect(JSON.stringify(result.structuredContent).split('"licenceUrl"')).toHaveLength(2);
+      expect(text(result)).toContain(requests.at(-1)!.href);
+    }
+  });
+
+  it('documents the page-size ceiling, limit-free cursors and sitting-date order', () => {
+    const schema = z.toJSONSchema(ukparlSearchHansard.input, {
+      io: 'input',
+      target: 'draft-2020-12',
+    });
+    expect(schema.properties?.sortOrder).toMatchObject({
+      enum: ['SittingDateAsc', 'SittingDateDesc'],
+    });
+    expect(ukparlSearchHansard.enrichment?.cap.description).toMatch(/ceiling/i);
+    expect(ukparlSearchHansard.enrichment?.cap.description).not.toMatch(/effective/i);
+    expect(ukparlSearchHansard.input.shape.cursor.description).not.toMatch(/effective limit/i);
+    expect(ukparlSearchHansard.input.shape.limit.description).toMatch(/default 5, cap 100/);
+    expect(ukparlSearchHansard.description).toMatch(/newest sitting first/);
+  });
+
+  it.each([
+    [undefined, 5, undefined],
+    [100, 100, undefined],
+    [101, 100, 101],
+    [500, 100, 500],
+    [Number.MAX_SAFE_INTEGER, 100, Number.MAX_SAFE_INTEGER],
+  ])(
+    'serves limit %s as %s whole contributions, never requests above 100 and reports the 100 ceiling',
+    async (limit, effective, requestedLimit) => {
+      const rows = Array.from({ length: 150 }, (_, index) => contribution(index + 1));
+      const requests = installHansard(windowed(rows));
+      const result = await runToolContract(
+        ukparlSearchHansard,
+        limit === undefined ? {} : { limit },
+      );
+      const value = output(result);
+      expect(requests[0]!.searchParams.get('queryParameters.take')).toBe(String(effective));
+      expect(value.delivery).toBe('full');
+      expect(value.items).toHaveLength(effective);
+      expect(value.page).toMatchObject({ returned: effective, total: 150, hasMore: true });
+      expect(result.structuredContent).toMatchObject({
+        applied: { limit: effective },
+        truncated: true,
+        shown: effective,
+        cap: 100,
+      });
+      if (requestedLimit === undefined) {
+        expect(result.structuredContent).not.toHaveProperty('requestedLimit');
+        expect(text(result)).not.toContain('is capped at');
+      } else {
+        expect(result.structuredContent).toMatchObject({ requestedLimit });
+        expect(text(result)).toContain(`Requested limit ${requestedLimit} is capped at 100.`);
+      }
+    },
+  );
+
   it('labels official permalink URLs as API JSON resolvers rather than browser destinations', async () => {
     installHansard(() => spoken([contribution()]));
     const value = output(await runToolContract(ukparlSearchHansard, {}));
@@ -291,10 +420,13 @@ describe('ukparl_search_hansard', () => {
     });
     expect(Object.fromEntries(requests[0]!.searchParams)).toEqual({
       'queryParameters.skip': '0',
-      'queryParameters.take': '20',
+      'queryParameters.take': '100',
       'queryParameters.outputType': 'List',
     });
-    expect(result.structuredContent).toMatchObject({ requestedLimit: 999, applied: { limit: 20 } });
+    expect(result.structuredContent).toMatchObject({
+      requestedLimit: 999,
+      applied: { limit: 100 },
+    });
     expect(text(result)).toContain('No matches. Repeat ukparl_search_hansard');
     expect(text(result)).toContain('empty result does not establish');
     const dated = await runToolContract(ukparlSearchHansard, { startDate: '1900-02-01' });
@@ -311,23 +443,32 @@ describe('ukparl_search_hansard', () => {
     },
   );
 
-  it('binds collection cursors to source, filters and effective limit, and permits past-end empty source pages', async () => {
-    const requests = installHansard((url) =>
-      spoken(Number(url.searchParams.get('queryParameters.skip')) === 0 ? [contribution()] : [], 2),
-    );
+  it('binds collection cursors to source, filters and sortOrder, resumes them under another limit, and permits past-end empty source pages', async () => {
+    const requests = installHansard(windowed([contribution(), contribution(2), contribution(3)]));
     const first = output(await runToolContract(ukparlSearchHansard, { limit: 1 }));
     const cursor = first.page!.nextCursor!;
-    for (const change of [
-      { query: 'other' },
-      { house: 'lords' },
-      { limit: 2 },
-      { debateSectionId: '123' },
-    ])
+    const ascending = output(
+      await runToolContract(ukparlSearchHansard, { limit: 1, sortOrder: 'SittingDateAsc' }),
+    ).page!.nextCursor!;
+    expect(requests).toHaveLength(2);
+    for (const [change, minted] of [
+      [{ query: 'other' }, cursor],
+      [{ house: 'lords' }, cursor],
+      [{ debateSectionId: '123' }, cursor],
+      [{ sortOrder: 'SittingDateAsc' }, cursor],
+      [{ sortOrder: 'SittingDateDesc' }, cursor],
+      [{ sortOrder: 'SittingDateDesc' }, ascending],
+      [{}, ascending],
+    ] as const)
       error(
-        await runToolContract(ukparlSearchHansard, { limit: 1, ...change, cursor }),
+        await runToolContract(ukparlSearchHansard, { limit: 1, ...change, cursor: minted }),
         'invalid_cursor',
       );
-    error(await runToolContract(ukparlSearchHansard, { cursor: 'broken!' }), 'invalid_cursor');
+    error(
+      await runToolContract(ukparlSearchHansard, { cursor: 'broken!' }),
+      'invalid_cursor',
+      'Repeat the same tool with the same filters and no cursor or contentCursor to start a new page sequence.',
+    );
     const foreign = advanceCollectionCursor(
       readCollectionCursor(undefined, {
         source: 'bills',
@@ -341,7 +482,22 @@ describe('ukparl_search_hansard', () => {
       await runToolContract(ukparlSearchHansard, { limit: 1, cursor: foreign }),
       'invalid_cursor',
     );
-    expect(requests).toHaveLength(1);
+    expect(requests).toHaveLength(2);
+    const resumed = output(await runToolContract(ukparlSearchHansard, { limit: 2, cursor }));
+    expect(resumed.items!.map((row) => row.itemId)).toEqual(['2', '3']);
+    expect(resumed.page).toEqual({ returned: 2, total: 3, hasMore: false });
+    expect(requests.at(-1)!.searchParams.get('queryParameters.skip')).toBe('1');
+    expect(requests.at(-1)!.searchParams.get('queryParameters.take')).toBe('2');
+    const ascendingNext = output(
+      await runToolContract(ukparlSearchHansard, {
+        limit: 5,
+        sortOrder: 'SittingDateAsc',
+        cursor: ascending,
+      }),
+    );
+    expect(ascendingNext.items!.map((row) => row.itemId)).toEqual(['2', '3']);
+    expect(requests.at(-1)!.searchParams.get('queryParameters.orderBy')).toBe('SittingDateAsc');
+    expect(requests.at(-1)!.searchParams.get('queryParameters.skip')).toBe('1');
     const end = advanceCollectionCursor(
       readCollectionCursor(undefined, {
         source: 'hansard',
@@ -353,7 +509,7 @@ describe('ukparl_search_hansard', () => {
     );
     expect(
       output(await runToolContract(ukparlSearchHansard, { limit: 1, cursor: end })).page,
-    ).toEqual({ returned: 0, total: 2, hasMore: false });
+    ).toEqual({ returned: 0, total: 3, hasMore: false });
     expect(requests.at(-1)!.searchParams.get('queryParameters.skip')).toBe('99');
   });
 
@@ -373,6 +529,29 @@ describe('ukparl_search_hansard', () => {
     expect(text(result)).toContain(failure.error.message);
   });
 
+  it('fails a valid cursor whose source page is empty before its reported total as a source inconsistency, never as cursor input', async () => {
+    const requests = installHansard((url) =>
+      spoken(Number(url.searchParams.get('queryParameters.skip')) === 0 ? [contribution()] : [], 3),
+    );
+    const cursor = output(await runToolContract(ukparlSearchHansard, { limit: 1 })).page!
+      .nextCursor!;
+    for (const limit of [1, 2]) {
+      const result = await runToolContract(ukparlSearchHansard, { limit, cursor });
+      expect(result.structuredContent).toMatchObject({
+        error: { code: JsonRpcErrorCode.ValidationError, data: { retryable: false } },
+      });
+      expect(result.structuredContent).not.toMatchObject({
+        error: { data: { reason: 'invalid_cursor' } },
+      });
+      expect(text(result)).toContain('empty page before its reported pagination total');
+    }
+    expect(requests.map((url) => url.searchParams.get('queryParameters.skip'))).toEqual([
+      '0',
+      '1',
+      '1',
+    ]);
+  });
+
   it('accepts an empty source page at the exact advertised end without a continuation', async () => {
     const requests = installHansard(() => spoken([], 2));
     const cursor = advanceCollectionCursor(
@@ -390,34 +569,32 @@ describe('ukparl_search_hansard', () => {
     expect(requests[0]!.searchParams.get('queryParameters.skip')).toBe('2');
   });
 
-  it('pages byte-fit whole contributions by actual emitted count without losing IDs', async () => {
+  it('pages limit-sized whole contributions past 24,000 reply bytes without losing IDs', async () => {
     const rows = Array.from({ length: 13 }, (_, i) => ({
       ...contribution(i + 1),
-      ContributionTextFull: `${i} ${'文é'.repeat(250 + (i % 3) * 30)}`,
+      ContributionTextFull: `${i} ${'文é'.repeat(450 + (i % 3) * 30)}`,
     }));
-    const requests = installHansard((url) => {
-      const skip = Number(url.searchParams.get('queryParameters.skip'));
-      const take = Number(url.searchParams.get('queryParameters.take'));
-      return spoken(rows.slice(skip, skip + take), rows.length);
-    });
+    const requests = installHansard(windowed(rows));
     const ids: string[] = [];
+    const sizes: number[] = [];
     let cursor: string | undefined;
-    let calls = 0;
     do {
-      const result = output(
-        await runToolContract(ukparlSearchHansard, { limit: 20, ...(cursor ? { cursor } : {}) }),
-      );
-      expect(result.delivery).toBe('full');
-      expect(result.items!.length).toBeGreaterThan(0);
-      expect(result.page!.returned).toBe(result.items!.length);
+      const result = await runToolContract(ukparlSearchHansard, {
+        limit: 5,
+        ...(cursor ? { cursor } : {}),
+      });
+      const value = output(result);
+      expect(value.delivery).toBe('full');
+      expect(value.page!.returned).toBe(value.items!.length);
       expect(requests.at(-1)!.searchParams.get('queryParameters.skip')).toBe(String(ids.length));
-      ids.push(...result.items!.map((row) => row.itemId));
-      cursor = result.page!.nextCursor;
-      calls++;
-      expect(calls).toBeLessThan(14);
+      sizes.push(value.items!.length);
+      ids.push(...value.items!.map((row) => row.itemId));
+      if (value.items!.length === 5)
+        expect(Buffer.byteLength(JSON.stringify(result))).toBeGreaterThan(24_000);
+      cursor = value.page!.nextCursor;
     } while (cursor);
+    expect(sizes).toEqual([5, 5, 3]);
     expect(ids).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13']);
-    expect(calls).toBeGreaterThan(1);
   });
 
   it('reconstructs very long escaped Unicode text, retains next contribution and rejects changed selection/revision', async () => {
@@ -455,10 +632,30 @@ describe('ukparl_search_hansard', () => {
       }),
       'invalid_cursor',
     );
+    error(
+      await runToolContract(ukparlSearchHansard, {
+        ...input,
+        sortOrder: 'SittingDateAsc',
+        contentCursor: cursor,
+      }),
+      'invalid_cursor',
+    );
+    const ascending = output(
+      await runToolContract(ukparlSearchHansard, { ...input, sortOrder: 'SittingDateAsc' }),
+    );
+    expect(ascending.delivery).toBe('outline');
+    error(
+      await runToolContract(ukparlSearchHansard, {
+        ...input,
+        contentCursor: ascending.contentPage!.entries![0]!.contentCursor,
+      }),
+      'invalid_cursor',
+    );
     full = 'Changed revision';
     error(
       await runToolContract(ukparlSearchHansard, { ...input, contentCursor: cursor }),
       'source_changed',
+      'Repeat the same tool with its original filters and any collection cursor, but no contentCursor, then follow the new content cursors.',
     );
   });
 
@@ -469,7 +666,11 @@ describe('ukparl_search_hansard', () => {
     const outage = runToolContract(ukparlSearchHansard, {});
     await vi.runAllTimersAsync();
     const unavailable = await outage;
-    expect(unavailable.isError).toBe(true);
+    error(unavailable, 'http_server_error');
+    expect(unavailable.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.ServiceUnavailable },
+    });
+    expect(text(unavailable)).toContain('shorter date windows');
     expect(unavailable.structuredContent).not.toHaveProperty('items');
     disposeParliamentHttp();
     initParliamentHttp({
@@ -485,9 +686,15 @@ describe('ukparl_search_hansard', () => {
     });
     await vi.runAllTimersAsync();
     const result = await timeout;
-    error(result, 'attempt_timeout');
+    error(result, 'call_deadline_exceeded');
+    expect(result.structuredContent).toMatchObject({
+      error: { code: JsonRpcErrorCode.Timeout },
+    });
     expect(text(result)).toContain('shorter date windows');
     expect(result.structuredContent).not.toHaveProperty('items');
+    expect(ukparlSearchHansard.errors?.map((entry) => entry.reason)).not.toContain(
+      'attempt_timeout',
+    );
     disposeParliamentHttp();
     const requests = installHansard(() => spoken([contribution()]));
     const recovered = output(

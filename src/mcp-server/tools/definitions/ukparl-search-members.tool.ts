@@ -25,6 +25,8 @@ import {
   SourceSchema,
 } from '@/services/parliament-http/parliament-models.js';
 
+/** The Members search API serves at most 20 rows whatever `take` asks for. */
+const LIMIT_CAP = 20;
 const QuerySchema = z
   .object({
     name: z.string().optional().describe('Applied name substring.'),
@@ -54,7 +56,6 @@ const AppliedSchema = z.object({
 const HitSchema = MemberSchema.extend({
   memberId: z.string().describe('Members API identifier for ukparl_get_member.'),
   links: z.array(MemberLinkSchema).nullish().describe('Published source relationship links.'),
-  source: SourceSchema.describe('Actual search provenance.'),
   detailLevel: z
     .literal('summary')
     .describe('Search metadata without optional biographies or histories.'),
@@ -104,7 +105,9 @@ export const ukparlSearchMembers = tool('ukparl_search_members', {
     ),
     items: z.array(HitSchema).optional().describe('Whole summary member records.'),
     page: PageSchema.optional().describe('Collection continuation by actually emitted records.'),
-    source: SourceSchema.optional().describe('Actual official search request.'),
+    source: SourceSchema.optional().describe(
+      'Actual official search request; provenance for every item on the page.',
+    ),
     totalCount: z.number().int().optional().describe('Source total before paging.'),
     guidance: z.string().optional().describe('Empty-result recovery guidance.'),
   }),
@@ -114,7 +117,11 @@ export const ukparlSearchMembers = tool('ukparl_search_members', {
     requestedLimit: z.number().int().optional().describe('Original request when capped.'),
     truncated: z.boolean().optional().describe('Further whole member results remain.'),
     shown: z.number().int().optional().describe('Actual whole members emitted.'),
-    cap: z.number().int().optional().describe('Effective member workload cap.'),
+    cap: z
+      .number()
+      .int()
+      .optional()
+      .describe('Member page-size ceiling; a larger limit is clamped to it.'),
   },
   enrichmentTrailer: {
     applied: { render: enrichmentField('applied') },
@@ -208,11 +215,28 @@ export const ukparlSearchMembers = tool('ukparl_search_members', {
       thrownBy: 'service',
       when: 'Selected source records changed during content retrieval.',
       recovery:
-        'Repeat ukparl_search_members with original filters and no contentCursor, then follow the new content cursors.',
+        'Repeat ukparl_search_members with original filters and any collection cursor, but no contentCursor, then follow the new content cursors.',
+    },
+    {
+      reason: 'call_deadline_exceeded',
+      code: JsonRpcErrorCode.Timeout,
+      thrownBy: 'service',
+      when: 'The 45-second call deadline elapsed before the official API answered.',
+      recovery:
+        'Repeat ukparl_search_members once after a short wait; if it times out again, add a name, constituency, partyId or house filter, or lower limit.',
+    },
+    {
+      reason: 'http_server_error',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      thrownBy: 'service',
+      when: 'The official API returned an HTTP 5xx server error.',
+      recovery:
+        'Repeat ukparl_search_members with a narrower name, constituency, partyId or house filter, or a lower limit; retry later if it still fails.',
     },
   ],
   async handler(input, ctx) {
-    const limit = Math.min(20, input.limit);
+    const limit = Math.min(LIMIT_CAP, input.limit);
+    const capped = input.limit > LIMIT_CAP;
     const mode = input.asOf ? ('historical' as const) : ('search' as const);
     const query = {
       name: input.name,
@@ -223,11 +247,11 @@ export const ukparlSearchMembers = tool('ukparl_search_members', {
       asOf: input.asOf,
     };
     const applied = { mode, source: 'members' as const, limit, filters: '/query' as const };
-    const notice = `${LICENCE_NOTICE} ${input.asOf ? 'Historical membership search; latest profile fields are source metadata and may contain null values.' : 'No implicit membership-date restriction; currentOnly=false includes current and former members.'}${input.limit > 20 ? ` Requested limit ${input.limit} is capped at 20.` : ''}`;
+    const notice = `${LICENCE_NOTICE} ${input.asOf ? 'Historical membership search; latestParty, latestHouseMembership and names are as they stood on asOf, not current values, and may be null.' : 'No implicit membership-date restriction; currentOnly=false includes current and former members.'}${capped ? ` Requested limit ${input.limit} is capped at ${LIMIT_CAP}.` : ''}`;
     const enrichment = {
       applied,
       notice,
-      ...(input.limit > 20 ? { requestedLimit: input.limit } : {}),
+      ...(capped ? { requestedLimit: input.limit } : {}),
     };
     ctx.enrich(enrichment);
     if (input.asOf) {
@@ -255,7 +279,6 @@ export const ukparlSearchMembers = tool('ukparl_search_members', {
         ...item.value,
         memberId: String(item.value.id),
         links: item.links,
-        source: result.source,
         detailLevel: 'summary' as const,
       };
     });
@@ -286,7 +309,7 @@ export const ukparlSearchMembers = tool('ukparl_search_members', {
         ...enrichment,
         truncated: selected.page.hasMore,
         shown: selected.page.returned,
-        cap: limit,
+        cap: LIMIT_CAP,
         notice: `${notice}${selected.page.returned === 0 ? ' No members matched; broaden the name or reduce filters in ukparl_search_members.' : ''}`,
       }),
       applyEnrichment: (values) => ctx.enrich(values),

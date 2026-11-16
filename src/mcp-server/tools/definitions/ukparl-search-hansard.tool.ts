@@ -8,6 +8,7 @@ import {
   HANSARD_COVERAGE,
   HansardCoverageSchema,
   HansardItemSchema,
+  HansardSortOrderSchema,
 } from '@/services/hansard/hansard-schemas.js';
 import { getHansardService } from '@/services/hansard/hansard-service.js';
 import {
@@ -28,11 +29,13 @@ import {
   validateDateRange,
 } from '@/services/parliament-http/parliament-models.js';
 
+const LIMIT_CAP = 100;
+
 /** Discover Spoken contributions, retaining full source text and independent collection/content cursors. */
 export const ukparlSearchHansard = tool('ukparl_search_hansard', {
   title: 'Search spoken Hansard',
   description:
-    'Search spoken Westminster Hansard contributions by topic, member, House, date or numeric debateSectionId. Returns full source contribution text where supplied, including HTML; previews are labelled summaries. Repeat with a returned debateSectionId to search that section, which does not establish an entire debate transcript. Historical completeness is not guaranteed, including the 2004–2006 website warning despite some API records. Use ukparl_lookup_reference topic=coverage for archive guidance. Follow collection cursors unchanged and contentCursor for lossless oversized contributions; retry timeouts with shorter date windows.',
+    'Search spoken Westminster Hansard contributions by topic, member, House, date or numeric debateSectionId. Results run newest sitting first; sortOrder=SittingDateAsc starts from the oldest sitting. Returns full source contribution text where supplied, including HTML; previews are labelled summaries. Repeat with a returned debateSectionId to search that section, which does not establish an entire debate transcript. Historical completeness is not guaranteed, including the 2004–2006 website warning despite some API records. Use ukparl_lookup_reference topic=coverage for archive guidance. Follow collection cursors unchanged and contentCursor for lossless oversized contributions; retry timeouts with shorter date windows.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     query: optionalText(z.string().trim().min(1)).describe(
@@ -51,7 +54,10 @@ export const ukparlSearchHansard = tool('ukparl_search_hansard', {
       'Inclusive latest sitting date, real YYYY-MM-DD; must not precede startDate.',
     ),
     debateSectionId: optionalText(IdSchema).describe(
-      'Returned numeric debateSectionId, distinct from external debate IDs.',
+      'Returned numeric debateSectionId, distinct from external debate IDs. A section is one sitting, so either sortOrder keeps its source order, highest orderInDebateSection first; sort by orderInDebateSection to read it in sequence.',
+    ),
+    sortOrder: optionalText(HansardSortOrderSchema).describe(
+      'Sitting-date order: SittingDateDesc (newest first, the source default) or SittingDateAsc (oldest first). Contributions within one sitting keep source order.',
     ),
     limit: z
       .number()
@@ -59,9 +65,11 @@ export const ukparlSearchHansard = tool('ukparl_search_hansard', {
       .positive()
       .max(Number.MAX_SAFE_INTEGER)
       .default(5)
-      .describe('Requested whole contributions; default 5, effective cap 20 with notice.'),
+      .describe(
+        `Requested whole contributions; default 5, cap ${LIMIT_CAP}; larger safe integers are capped with a notice.`,
+      ),
     cursor: optionalText(z.string().min(1)).describe(
-      'Opaque collection continuation; repeat the same filters and effective limit.',
+      'Opaque collection continuation; repeat the same filters and sortOrder. It resumes at its offset under any limit.',
     ),
     contentCursor: optionalText(z.string().min(1)).describe(
       'Opaque lossless content continuation; preserve original selection and collection cursor.',
@@ -77,13 +85,9 @@ export const ukparlSearchHansard = tool('ukparl_search_hansard', {
       'Exact official Spoken request provenance, including empty pages.',
     ),
     items: z
-      .array(
-        HansardItemSchema.describe(
-          'One source Spoken contribution with exact text and provenance.',
-        ),
-      )
+      .array(HansardItemSchema.describe('One source Spoken contribution with exact text.'))
       .optional()
-      .describe('Whole Spoken contributions in source search order.'),
+      .describe('Whole Spoken contributions ordered by sitting date per sortOrder, not by rank.'),
     page: PageSchema.optional().describe(
       'Actual emitted whole-item continuation, independent of content delivery.',
     ),
@@ -121,6 +125,9 @@ export const ukparlSearchHansard = tool('ukparl_search_hansard', {
         startDate: z.string().optional().describe('Applied inclusive start date, unchanged.'),
         endDate: z.string().optional().describe('Applied inclusive end date, unchanged.'),
         debateSectionId: z.string().optional().describe('Applied numeric section filter.'),
+        sortOrder: HansardSortOrderSchema.optional().describe(
+          'Applied sitting-date order; absent when the source default applies.',
+        ),
         dateSemantics: z
           .literal('sitting_date_inclusive_no_inferred_window')
           .describe('Date filters use sitting dates without a default range.'),
@@ -150,7 +157,11 @@ export const ukparlSearchHansard = tool('ukparl_search_hansard', {
       .int()
       .optional()
       .describe('Whole contributions emitted or selected for reconstruction.'),
-    cap: z.number().int().optional().describe('Actual collection workload cap.'),
+    cap: z
+      .number()
+      .int()
+      .optional()
+      .describe('Whole-contribution page-size ceiling; a larger limit is clamped to it.'),
   },
   enrichmentTrailer: {
     applied: { render: enrichmentField('applied') },
@@ -230,7 +241,7 @@ export const ukparlSearchHansard = tool('ukparl_search_hansard', {
       code: JsonRpcErrorCode.Conflict,
       when: 'Selected contribution data changed during content reconstruction.',
       recovery:
-        'Repeat the same tool with its original filters and no contentCursor, then follow the new content cursors.',
+        'Repeat the same tool with its original filters and any collection cursor, but no contentCursor, then follow the new content cursors.',
       thrownBy: 'service',
     },
     {
@@ -249,25 +260,26 @@ export const ukparlSearchHansard = tool('ukparl_search_hansard', {
       thrownBy: 'service',
     },
     {
-      reason: 'attempt_timeout',
+      reason: 'call_deadline_exceeded',
       code: JsonRpcErrorCode.Timeout,
-      when: 'A Spoken source attempt timed out.',
+      when: 'The 45-second call deadline elapsed while searching Spoken contributions.',
       recovery:
-        'Repeat ukparl_search_hansard with shorter date windows and the same remaining filters.',
+        'Repeat ukparl_search_hansard once after a short wait; if it times out again, use shorter date windows and the same remaining filters.',
       thrownBy: 'service',
     },
     {
-      reason: 'call_deadline_exceeded',
-      code: JsonRpcErrorCode.Timeout,
-      when: 'The shared call deadline elapsed while searching Spoken contributions.',
+      reason: 'http_server_error',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'The official API returned an HTTP 5xx server error.',
       recovery:
-        'Repeat ukparl_search_hansard with shorter date windows and the same remaining filters.',
+        'Repeat ukparl_search_hansard with shorter date windows, a memberId or a debateSectionId, and the same remaining filters; retry later if it still fails.',
       thrownBy: 'service',
     },
   ],
   async handler(input, ctx) {
     validateDateRange(input.startDate, input.endDate);
-    const limit = Math.min(input.limit, 20);
+    // Spoken search answers take=100 but fails above it, so the cap is also the upstream maximum.
+    const limit = Math.min(input.limit, LIMIT_CAP);
     const { cursor: _cursor, contentCursor: _contentCursor, limit: _limit, ...filters } = input;
     using call = getParliamentHttp().beginCall(ctx);
     const result = await getHansardService().search(
@@ -306,7 +318,7 @@ export const ukparlSearchHansard = tool('ukparl_search_hansard', {
         totalCount: selected.page.total,
         ...(input.limit > limit ? { requestedLimit: input.limit } : {}),
         ...(selected.page.hasMore
-          ? { truncated: true, shown: selected.page.returned, cap: limit }
+          ? { truncated: true, shown: selected.page.returned, cap: LIMIT_CAP }
           : {}),
       }),
       applyEnrichment: (values) => ctx.enrich(values),

@@ -42,6 +42,10 @@ import {
   SourceSchema,
 } from '@/services/parliament-http/parliament-models.js';
 
+/** Local histories page whole rows up to this ceiling. */
+const HISTORY_CAP = 50;
+/** Members Voting serves fixed native pages of this size; caller limit never changes it. */
+const VOTING_PAGE_SIZE = 20;
 const SectionSchema = z
   .enum(['profile', 'roles', 'committee_seats', 'contact', 'interests', 'voting'])
   .describe('Member subsection.');
@@ -235,7 +239,13 @@ export const ukparlGetMember = tool('ukparl_get_member', {
       .int()
       .optional()
       .describe('Actual whole items emitted in this collection page.'),
-    cap: z.number().int().optional().describe('Effective whole-item workload cap.'),
+    cap: z
+      .number()
+      .int()
+      .optional()
+      .describe(
+        'Page-size ceiling for the selected section: 50 for local histories, where a larger limit is clamped; the native 20 for voting.',
+      ),
   },
   enrichmentTrailer: {
     applied: { render: enrichmentField('applied') },
@@ -329,12 +339,29 @@ export const ukparlGetMember = tool('ukparl_get_member', {
       thrownBy: 'service',
       when: 'Selected source data changed during recursive content retrieval.',
       recovery:
-        'Repeat ukparl_get_member with original selectors and no contentCursor, then follow the new content cursors.',
+        'Repeat ukparl_get_member with original selectors and any collection cursor, but no contentCursor, then follow the new content cursors.',
+    },
+    {
+      reason: 'call_deadline_exceeded',
+      code: JsonRpcErrorCode.Timeout,
+      thrownBy: 'service',
+      when: 'The 45-second call deadline elapsed before the official API answered.',
+      recovery:
+        'Repeat ukparl_get_member with the same memberId, section and cursor after a short wait.',
+    },
+    {
+      reason: 'http_server_error',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      thrownBy: 'service',
+      when: 'The official API returned an HTTP 5xx server error.',
+      recovery:
+        'Repeat ukparl_get_member with the same memberId, section and cursor after a short wait; report a server error that persists.',
     },
   ],
   async handler(input, ctx) {
     const voting = input.section === 'voting';
-    const limit = voting ? 20 : Math.min(input.limit, 50);
+    const cap = voting ? VOTING_PAGE_SIZE : HISTORY_CAP;
+    const limit = voting ? VOTING_PAGE_SIZE : Math.min(input.limit, HISTORY_CAP);
     const source = input.section === 'committee_seats' ? 'committees' : 'members';
     const applied = {
       memberId: input.memberId,
@@ -344,8 +371,8 @@ export const ukparlGetMember = tool('ukparl_get_member', {
       limit,
       source,
     };
-    const notice = `${LICENCE_NOTICE}${voting ? ' Voting history preserves recorded lobby and teller facts. Native page size is 20; caller limit does not change the upstream page.' : input.section === 'interests' ? ' Registered interests reflect the selected source; historical register completeness is not guaranteed.' : input.section === 'contact' ? ' Published official contacts retain source descriptions and caveats; personal data is excluded from the Open Parliament Licence.' : ''}${!voting && input.limit > 50 ? ` Requested limit ${input.limit} is capped at 50.` : ''}`;
-    const changedLimit = voting || input.limit > 50;
+    const notice = `${LICENCE_NOTICE}${voting ? ' Voting history preserves recorded lobby and teller facts. Native page size is 20; caller limit does not change the upstream page.' : input.section === 'interests' ? ' Registered interests reflect the selected source; historical register completeness is not guaranteed.' : input.section === 'contact' ? ' Published official contacts retain source descriptions and caveats; personal data is excluded from the Open Parliament Licence.' : ''}${!voting && input.limit > HISTORY_CAP ? ` Requested limit ${input.limit} is capped at ${HISTORY_CAP}.` : ''}`;
+    const changedLimit = voting || input.limit > HISTORY_CAP;
     const enrichment = {
       applied,
       notice,
@@ -391,8 +418,8 @@ export const ukparlGetMember = tool('ukparl_get_member', {
     const cursor = voting
       ? {
           ...parsed,
-          nativePage: Math.floor(parsed.offset / 20) + 1,
-          intraPageOffset: parsed.offset % 20,
+          nativePage: Math.floor(parsed.offset / VOTING_PAGE_SIZE) + 1,
+          intraPageOffset: parsed.offset % VOTING_PAGE_SIZE,
         }
       : parsed;
     using call = getParliamentHttp().beginCall(ctx);
@@ -472,16 +499,16 @@ export const ukparlGetMember = tool('ukparl_get_member', {
             .map((value) => ({ kind: 'interest_category', value: flattenInterestCategory(value) }));
         }
       } else if (voting && input.house) {
-        const nativePage = Math.floor(cursor.offset / 20) + 1;
+        const nativePage = Math.floor(cursor.offset / VOTING_PAGE_SIZE) + 1;
         const result = await service.voting(call, input.memberId, input.house, nativePage);
         payload.source = result.source;
         payload.links = result.data.links;
         payload.nativePage = nativePage;
-        payload.nativePageSize = 20;
+        payload.nativePageSize = VOTING_PAGE_SIZE;
         payload.guidance =
           'Use divisionId with this explicit House in ukparl_search_divisions mode=detail or voters. Neither lobby flag alone establishes abstention.';
         total = result.data.totalResults;
-        rows = (result.data.items ?? []).slice(cursor.offset % 20).map((item) => {
+        rows = (result.data.items ?? []).slice(cursor.offset % VOTING_PAGE_SIZE).map((item) => {
           if (!item.value) throw validationError('Members voting supplied a null vote record.');
           return {
             kind: 'vote',
@@ -553,7 +580,7 @@ export const ukparlGetMember = tool('ukparl_get_member', {
           ? {
               truncated: selected.page.hasMore,
               shown: selected.page.returned,
-              cap: limit,
+              cap,
               notice: `${notice}${selected.page.returned === 0 ? ' The selected source collection returned no rows.' : ''}`,
             }
           : {}),

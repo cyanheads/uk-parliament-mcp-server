@@ -20,27 +20,37 @@ import {
   installDivisions,
   lordsDivision,
 } from '../services/divisions/divisions-fixtures.js';
-import { renderedPayload } from './rendered-payload.js';
+import { renderedPayload, text } from './rendered-payload.js';
 
 type Result = Awaited<ReturnType<typeof runToolContract>>;
 type Output = ReturnType<typeof ukparlSearchDivisions.output.parse>;
-function text(result: Result) {
-  return result.content
-    .filter((block) => block.type === 'text')
-    .map((block) => block.text)
-    .join('\n');
-}
+/** Full pages hold whole records of at most 24,000 JSON bytes each; content pages fit 24,000 bytes. */
 function output(result: Result): Output {
   expect(result.isError).not.toBe(true);
-  expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(24_000);
   const value = ukparlSearchDivisions.output.parse(result.structuredContent);
+  if (value.delivery === 'full') {
+    const structured = result.structuredContent as { items?: unknown[]; voters?: unknown[] };
+    for (const row of [...(structured.items ?? []), ...(structured.voters ?? [])])
+      expect(Buffer.byteLength(JSON.stringify(row))).toBeLessThanOrEqual(24_000);
+  } else expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(24_000);
   expect(renderedPayload(text(result))).toEqual(result.structuredContent);
   return value;
 }
-function error(result: Result, reason: string) {
+/** Commons search routes serve at most 25 rows whatever take asks for; Lords honors take. */
+function upstreamSlice<T>(house: 'commons' | 'lords', rows: T[], url: URL): T[] {
+  const prefix = house === 'commons' ? 'queryParameters.' : '';
+  const skip = Number(url.searchParams.get(`${prefix}skip`));
+  const take = Number(url.searchParams.get(`${prefix}take`));
+  return rows.slice(skip, skip + (house === 'commons' ? Math.min(take, 25) : take));
+}
+function searchParam(house: 'commons' | 'lords', url: URL, name: 'skip' | 'take') {
+  return url.searchParams.get(house === 'commons' ? `queryParameters.${name}` : name);
+}
+/** `hint`, when given, is the tool's own declared recovery, which no throw-site hint may replace. */
+function error(result: Result, reason: string, hint?: string) {
   expect(result.isError).toBe(true);
   expect(result.structuredContent).toMatchObject({
-    error: { data: { reason, recovery: { hint: expect.any(String) } } },
+    error: { data: { reason, recovery: { hint: hint ?? expect.any(String) } } },
   });
   expect(text(result)).toContain(reason);
   const structured = result.structuredContent as {
@@ -129,7 +139,7 @@ describe('ukparl_search_divisions', () => {
     'keeps empty %s member-voting pages honest at the cap and past the end',
     async (house) => {
       const requests = installDivisions(() => []);
-      const selection = { house, mode: 'search', memberId: '1', limit: 10 };
+      const selection = { house, mode: 'search', memberId: '1' };
       const first = output(
         await runToolContract(ukparlSearchDivisions, { house, memberId: '1', limit: 999 }),
       );
@@ -168,19 +178,17 @@ describe('ukparl_search_divisions', () => {
     const input = { house: 'commons', memberId: '1' };
     const first = output(await runToolContract(ukparlSearchDivisions, input));
     expect(first.delivery).toBe('outline');
-    expect(await reconstruct(input, first)).toMatchObject({
+    const restored = (await reconstruct(input, first)) as Output;
+    expect(restored).toMatchObject({
+      source: { api: 'commons_votes', url: expect.stringContaining('/membervoting?') },
       items: [
-        {
-          title,
-          noCount: null,
-          memberVote: { memberId: '1', lobby: 'no', wasTeller: true },
-          source: { api: 'commons_votes', url: expect.stringContaining('/membervoting?') },
-        },
+        { title, noCount: null, memberVote: { memberId: '1', lobby: 'no', wasTeller: true } },
       ],
     });
+    expect(restored.items![0]).not.toHaveProperty('source');
   });
   it.each(['commons', 'lords'] as const)(
-    'retains %s member votes across repeated page re-slices and cursor bindings',
+    'retains %s member votes across limit-sized pages, a changed limit and cursor bindings',
     async (house) => {
       const rows = Array.from({ length: 5 }, (_, index) =>
         house === 'commons'
@@ -198,30 +206,32 @@ describe('ukparl_search_divisions', () => {
               publishedDivision: { ...lordsDivision(42 + index), title: '文'.repeat(1200) },
             },
       );
-      const requests = installDivisions((url) => {
-        const prefix = house === 'commons' ? 'queryParameters.' : '';
-        const skip = Number(url.searchParams.get(`${prefix}skip`));
-        const take = Number(url.searchParams.get(`${prefix}take`));
-        return rows.slice(skip, skip + take);
-      });
+      const requests = installDivisions((url) => upstreamSlice(house, rows, url));
       const ids: string[] = [];
       let cursor: string | undefined;
-      do {
-        const result = output(
-          await runToolContract(ukparlSearchDivisions, {
-            house,
-            memberId: '1',
-            limit: 999,
-            ...(cursor ? { cursor } : {}),
-          }),
-        );
+      // Page one asks for 2; the cursor then resumes at offset 2 under limit 3.
+      for (const [limit, expected] of [
+        [2, ['42', '43']],
+        [3, ['44', '45', '46']],
+      ] as const) {
+        const result = await runToolContract(ukparlSearchDivisions, {
+          house,
+          memberId: '1',
+          limit,
+          ...(cursor ? { cursor } : {}),
+        });
+        const value = output(result);
         expect(requests.at(-1)!.origin).toBe(
           house === 'commons'
             ? 'https://commonsvotes-api.parliament.uk'
             : 'https://lordsvotes-api.parliament.uk',
         );
-        expect(result.page).not.toHaveProperty('total');
-        for (const row of result.items!) {
+        expect(searchParam(house, requests.at(-1)!, 'skip')).toBe(String(ids.length));
+        expect(searchParam(house, requests.at(-1)!, 'take')).toBe(String(limit + 1));
+        expect(value.items!.map((row) => row.divisionId)).toEqual(expected);
+        expect(value.page).toMatchObject({ returned: expected.length });
+        expect(value.page).not.toHaveProperty('total');
+        for (const row of value.items!) {
           ids.push(row.divisionId);
           expect(row.memberVote).toEqual({
             memberId: '1',
@@ -229,20 +239,22 @@ describe('ukparl_search_divisions', () => {
             wasTeller: false,
           });
         }
-        cursor = result.page!.nextCursor;
-        if (cursor)
+        cursor = value.page!.nextCursor;
+        if (cursor) {
+          // The cap is the House search ceiling, not the effective limit of this page.
+          expect(result.structuredContent).toMatchObject({
+            applied: { limit },
+            truncation: { shown: expected.length, cap: house === 'commons' ? 24 : 10 },
+          });
           error(
-            await runToolContract(ukparlSearchDivisions, {
-              house,
-              memberId: '2',
-              limit: 999,
-              cursor,
-            }),
+            await runToolContract(ukparlSearchDivisions, { house, memberId: '2', limit, cursor }),
             'invalid_cursor',
           );
-      } while (cursor);
+        } else expect(result.structuredContent).not.toHaveProperty('truncation');
+      }
+      expect(cursor).toBeUndefined();
       expect(ids).toEqual(['42', '43', '44', '45', '46']);
-      expect(requests.length).toBeGreaterThan(2);
+      expect(requests).toHaveLength(2);
     },
   );
   it.each(['commons', 'lords'] as const)(
@@ -311,10 +323,18 @@ describe('ukparl_search_divisions', () => {
       expect(result.page).toMatchObject({ returned: 2, hasMore: true });
       expect(result.page).not.toHaveProperty('total');
       expect(result).not.toHaveProperty('totalCount');
+      expect(result.source).toMatchObject({ api: `${house}_votes`, url: url.href });
       for (const record of result.items!) {
         expect(record.detailLevel).toBe('summary');
-        expect(record).not.toHaveProperty('tellers');
-        expect(record).not.toHaveProperty('rosterSelectors');
+        for (const field of [
+          'tellers',
+          'rosterSelectors',
+          'source',
+          'rosterAvailableVia',
+          'headlineCountTreatment',
+          'headlineCountExplanationUrl',
+        ])
+          expect(record).not.toHaveProperty(field);
       }
     },
   );
@@ -323,25 +343,31 @@ describe('ukparl_search_divisions', () => {
     'clamps %s search workload and handles empty/past-end arrays',
     async (house) => {
       const requests = installDivisions(() => []);
+      const cap = house === 'commons' ? 24 : 10;
       const cappedResult = await runToolContract(ukparlSearchDivisions, { house, limit: 999 });
       const capped = output(cappedResult);
       expect(capped).toMatchObject({ items: [], page: { returned: 0, hasMore: false } });
       expect(cappedResult.structuredContent).toMatchObject({
         requestedLimit: 999,
-        applied: { limit: 10 },
+        applied: { limit: cap },
       });
-      expect(text(await runToolContract(ukparlSearchDivisions, { house }))).toContain(
-        'No matching rows',
-      );
-      expect(
-        requests[0]!.searchParams.get(house === 'commons' ? 'queryParameters.take' : 'take'),
-      ).toBe('11');
-      const selection = { house, mode: 'search', limit: 5 };
+      expect(text(cappedResult)).toContain(`Requested limit 999 is capped at ${cap}.`);
+      const atCap = await runToolContract(ukparlSearchDivisions, { house, limit: cap });
+      expect(atCap.structuredContent).not.toHaveProperty('requestedLimit');
+      expect(text(atCap)).not.toContain('is capped at');
+      const defaulted = await runToolContract(ukparlSearchDivisions, { house });
+      expect(text(defaulted)).toContain('No matching rows');
+      expect(defaulted.structuredContent).toMatchObject({ applied: { limit: 5 } });
+      expect(requests.map((url) => searchParam(house, url, 'take'))).toEqual([
+        String(cap + 1),
+        String(cap + 1),
+        '6',
+      ]);
       const cursor = advanceCollectionCursor(
         readCollectionCursor(undefined, {
           source: `${house}_votes`,
           selector: 'search',
-          filters: selection,
+          filters: { house, mode: 'search' },
           nativePageSize: 5,
         }),
         99,
@@ -365,7 +391,15 @@ describe('ukparl_search_divisions', () => {
         house,
         found: true,
         record: { divisionId: '42', detailLevel: 'complete' },
+        source: {
+          api: `${house}_votes`,
+          url:
+            house === 'commons'
+              ? 'https://commonsvotes-api.parliament.uk/data/division/42.json'
+              : 'https://lordsvotes-api.parliament.uk/data/Divisions/42',
+        },
       });
+      expect(detail.record).not.toHaveProperty('source');
       expect(detail.record!.tellers!.map((row) => [row.memberId, row.isTeller])).toEqual(
         house === 'commons'
           ? [
@@ -409,6 +443,29 @@ describe('ukparl_search_divisions', () => {
         house === 'commons'
           ? { party: 'Synthetic Labour', lobby: 'aye', voterCount: 1, tellerCount: 2 }
           : { party: 'Crossbench', lobby: 'content', voterCount: 1, tellerCount: 1 },
+      );
+    },
+  );
+
+  it.each(['commons', 'lords'] as const)(
+    'keeps %s headline-count semantics and the roster route on complete detail',
+    async (house) => {
+      installDivisions(() => (house === 'commons' ? commonsDivision() : lordsDivision()));
+      const result = await runToolContract(ukparlSearchDivisions, {
+        house,
+        mode: 'detail',
+        divisionId: '42',
+      });
+      expect(output(result).record).toMatchObject({
+        rosterAvailableVia: 'ukparl_search_divisions',
+        headlineCountTreatment:
+          house === 'commons'
+            ? expect.stringContaining('Official Commons AyeCount and NoCount exclude tellers')
+            : expect.stringContaining('Official Lords totals include teller votes'),
+        headlineCountExplanationUrl: 'https://www.parliament.uk/site-information/glossary/tellers/',
+      });
+      expect(text(result)).toContain(
+        'https://www.parliament.uk/site-information/glossary/tellers/',
       );
     },
   );
@@ -548,8 +605,9 @@ describe('ukparl_search_divisions', () => {
     expect(requests).toEqual([]);
   });
 
-  it('rejects reversed dates, malformed and changed-filter collection cursors before exchange', async () => {
-    const requests = installDivisions(() => [commonsDivision(), commonsDivision(43)]);
+  it('rejects reversed dates, malformed and changed-filter cursors before exchange, and resumes under a changed limit', async () => {
+    const rows = [42, 43, 44].map((id) => commonsDivision(id));
+    const requests = installDivisions((url) => upstreamSlice('commons', rows, url));
     error(
       await runToolContract(ukparlSearchDivisions, {
         house: 'commons',
@@ -567,10 +625,21 @@ describe('ukparl_search_divisions', () => {
       { house: 'commons', cursor: 'bad!' },
       { house: 'commons', limit: 1, query: 'different', cursor },
       { house: 'lords', limit: 1, cursor },
-      { house: 'commons', limit: 2, cursor },
     ])
-      error(await runToolContract(ukparlSearchDivisions, input), 'invalid_cursor');
+      error(
+        await runToolContract(ukparlSearchDivisions, input),
+        'invalid_cursor',
+        'Repeat the same tool and filters without cursor or contentCursor to start again.',
+      );
     expect(requests).toHaveLength(1);
+    const resumed = output(
+      await runToolContract(ukparlSearchDivisions, { house: 'commons', limit: 2, cursor }),
+    );
+    expect(resumed.items!.map((row) => row.divisionId)).toEqual(['43', '44']);
+    expect(resumed.page).toEqual({ returned: 2, hasMore: false });
+    expect(searchParam('commons', requests.at(-1)!, 'skip')).toBe('1');
+    expect(searchParam('commons', requests.at(-1)!, 'take')).toBe('3');
+    expect(requests).toHaveLength(2);
   });
 
   it.each(['commons', 'lords'] as const)(
@@ -594,13 +663,13 @@ describe('ukparl_search_divisions', () => {
   );
 
   it.each(['commons', 'lords'] as const)(
-    'pages varied full %s rosters by emitted whole IDs without teller loss',
+    'pages varied full %s rosters in limit-sized whole rows without teller loss',
     async (house) => {
       const names = Array.from(
-        { length: 39 },
+        { length: 59 },
         (_, i) => `${i} Éire 文 🏛️ \n"quoted"\\\`\`\` ${'é文'.repeat(80 + (i % 5) * 20)}`,
       );
-      installDivisions(() =>
+      const requests = installDivisions(() =>
         house === 'commons'
           ? {
               DivisionId: 42,
@@ -611,7 +680,7 @@ describe('ukparl_search_divisions', () => {
               })),
               AyeTellers: [
                 { MemberId: 3, Name: names[2], Party: 'P' },
-                { MemberId: 40, Name: 'Unique teller' },
+                { MemberId: 60, Name: 'Unique teller' },
               ],
               Noes: [],
               NoTellers: [],
@@ -626,7 +695,7 @@ describe('ukparl_search_divisions', () => {
               })),
               contentTellers: [
                 { memberId: 3, name: names[2], party: 'P' },
-                { memberId: 40, name: 'Unique teller' },
+                { memberId: 60, name: 'Unique teller' },
               ],
               notContents: [],
               notContentTellers: [],
@@ -635,29 +704,37 @@ describe('ukparl_search_divisions', () => {
       const ids: string[] = [];
       const tellers: string[] = [];
       let cursor: string | undefined;
-      let calls = 0;
-      do {
-        const value = output(
-          await runToolContract(ukparlSearchDivisions, {
-            house,
-            mode: 'voters',
-            divisionId: '42',
-            limit: 50,
-            ...(cursor ? { cursor } : {}),
-          }),
-        );
+      // 999 clamps to the voters cap of 50; the cursor then resumes under limit 4 and the default 20.
+      for (const [limit, returned] of [
+        [999, 50],
+        [4, 4],
+        [undefined, 6],
+      ] as const) {
+        const result = await runToolContract(ukparlSearchDivisions, {
+          house,
+          mode: 'voters',
+          divisionId: '42',
+          ...(limit ? { limit } : {}),
+          ...(cursor ? { cursor } : {}),
+        });
+        const value = output(result);
         expect(value.delivery).toBe('full');
-        expect(value.page!.total).toBe(40);
-        expect(value.page!.returned).toBe(value.voters!.length);
+        expect(value.page).toMatchObject({ returned, total: 60, hasMore: returned !== 6 });
+        expect(value.voters).toHaveLength(returned);
+        expect(result.structuredContent).toMatchObject({
+          applied: { limit: limit === 999 ? 50 : (limit ?? 20), returned },
+          ...(limit === 999 ? { requestedLimit: 999 } : {}),
+          ...(returned !== 6 ? { truncation: { shown: returned, cap: 50 } } : {}),
+        });
+        if (returned === 6) expect(result.structuredContent).not.toHaveProperty('truncation');
         ids.push(...value.voters!.map((row) => row.memberId));
         tellers.push(...value.voters!.filter((row) => row.isTeller).map((row) => row.memberId));
         cursor = value.page!.nextCursor;
-        calls++;
-        expect(calls).toBeLessThan(41);
-      } while (cursor);
-      expect(ids).toEqual(Array.from({ length: 40 }, (_, i) => String(i + 1)));
-      expect(tellers).toEqual(['3', '40']);
-      expect(calls).toBeGreaterThan(1);
+      }
+      expect(cursor).toBeUndefined();
+      expect(ids).toEqual(Array.from({ length: 60 }, (_, i) => String(i + 1)));
+      expect(tellers).toEqual(['3', '60']);
+      expect(requests).toHaveLength(3);
     },
   );
 
@@ -694,67 +771,61 @@ describe('ukparl_search_divisions', () => {
     error(
       await runToolContract(ukparlSearchDivisions, { ...input, contentCursor: cursor }),
       'source_changed',
+      'Repeat the original selection and any collection cursor, but no contentCursor, and follow the newly returned content cursors.',
     );
   });
 
-  it.each(['commons', 'lords'] as const)(
-    'pages %s search summaries by the actual byte-fit prefix and preserves every ID',
-    async (house) => {
-      const rows = Array.from({ length: 12 }, (_, i) =>
+  it.each([
+    ['commons', [24, 6]],
+    ['lords', [10, 10, 10]],
+  ] as const)(
+    'pages %s search summaries in whole records up to the House cap and preserves every ID',
+    async (house, pages) => {
+      const cap = pages[0];
+      const rows = Array.from({ length: 30 }, (_, i) =>
         house === 'commons'
           ? { ...commonsDivision(100 + i), Title: `${i} ${'文é'.repeat(200 + (i % 3) * 30)}` }
           : { ...lordsDivision(100 + i), title: `${i} ${'文é'.repeat(200 + (i % 3) * 30)}` },
       );
-      const requests = installDivisions((url) => {
-        const skip = Number(
-          url.searchParams.get(house === 'commons' ? 'queryParameters.skip' : 'skip'),
-        );
-        const take = Number(
-          url.searchParams.get(house === 'commons' ? 'queryParameters.take' : 'take'),
-        );
-        return rows.slice(skip, skip + take);
-      });
+      const requests = installDivisions((url) => upstreamSlice(house, rows, url));
       const ids: string[] = [];
       let cursor: string | undefined;
-      let calls = 0;
-      do {
+      for (const [index, returned] of pages.entries()) {
         const result = await runToolContract(ukparlSearchDivisions, {
           house,
-          limit: 10,
+          limit: 999,
           ...(cursor ? { cursor } : {}),
         });
         const value = output(result);
+        const last = index === pages.length - 1;
         expect(value.delivery).toBe('full');
-        expect(value.items!.length).toBeGreaterThan(0);
-        expect(value.page!.returned).toBe(value.items!.length);
+        expect(value.items).toHaveLength(returned);
+        expect(value.page).toMatchObject({ returned, hasMore: !last });
         expect(value.page).not.toHaveProperty('total');
         expect(result.structuredContent).not.toHaveProperty('totalCount');
-        expect(
-          requests.at(-1)!.searchParams.get(house === 'commons' ? 'queryParameters.skip' : 'skip'),
-        ).toBe(String(ids.length));
+        expect(searchParam(house, requests.at(-1)!, 'skip')).toBe(String(ids.length));
+        expect(searchParam(house, requests.at(-1)!, 'take')).toBe(String(cap + 1));
         expect(result.structuredContent).toMatchObject({
-          applied: { returned: value.items!.length },
+          requestedLimit: 999,
+          applied: { limit: cap, returned },
+          ...(last ? {} : { truncation: { shown: returned, cap } }),
         });
+        if (last) expect(result.structuredContent).not.toHaveProperty('truncation');
+        // Provenance rides once on the payload; per-item repeats stay on detail.
+        expect(value.source).toMatchObject({ api: `${house}_votes`, url: requests.at(-1)!.href });
+        for (const row of value.items!)
+          for (const field of [
+            'source',
+            'rosterAvailableVia',
+            'headlineCountTreatment',
+            'headlineCountExplanationUrl',
+          ])
+            expect(row).not.toHaveProperty(field);
         ids.push(...value.items!.map((row) => row.divisionId));
         cursor = value.page!.nextCursor;
-        calls++;
-        expect(calls).toBeLessThan(13);
-      } while (cursor);
-      expect(ids).toEqual([
-        '100',
-        '101',
-        '102',
-        '103',
-        '104',
-        '105',
-        '106',
-        '107',
-        '108',
-        '109',
-        '110',
-        '111',
-      ]);
-      expect(calls).toBeGreaterThan(2);
+      }
+      expect(cursor).toBeUndefined();
+      expect(ids).toEqual(Array.from({ length: 30 }, (_, i) => String(100 + i)));
     },
   );
 
@@ -801,11 +872,12 @@ describe('ukparl_search_divisions', () => {
         'invalid_cursor',
       );
     expect(requests).toHaveLength(1);
+    const { limit: _limit, ...filters } = input;
     const end = advanceCollectionCursor(
       readCollectionCursor(undefined, {
         source: 'commons_votes',
         selector: 'voters',
-        filters: input,
+        filters,
         nativePageSize: 1,
       }),
       7,
@@ -816,7 +888,7 @@ describe('ukparl_search_divisions', () => {
       readCollectionCursor(undefined, {
         source: 'commons_votes',
         selector: 'voters',
-        filters: input,
+        filters,
         nativePageSize: 1,
       }),
       8,
@@ -857,5 +929,25 @@ describe('ukparl_search_divisions', () => {
       const settled = await Promise.all(pending);
       for (const result of settled) expect(result.isError).not.toBe(true);
     }
+  });
+
+  it('renders an upstream 5xx and declares the call deadline with same-tool recovery', async () => {
+    installDivisions(() => new Response('', { status: 501 }));
+    const result = await runToolContract(ukparlSearchDivisions, { house: 'commons' });
+    error(result, 'http_server_error');
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        data: { recovery: { hint: expect.stringContaining('ukparl_search_divisions') } },
+      },
+    });
+    expect(ukparlSearchDivisions.errors).toContainEqual(
+      expect.objectContaining({
+        reason: 'call_deadline_exceeded',
+        code: JsonRpcErrorCode.Timeout,
+        thrownBy: 'service',
+        recovery: expect.stringContaining('ukparl_search_divisions'),
+      }),
+    );
   });
 });

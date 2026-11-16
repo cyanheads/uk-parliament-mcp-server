@@ -13,8 +13,10 @@ import {
 } from './parliament-cursors.js';
 import { type Page, PageSchema, type Source, SourceSchema } from './parliament-models.js';
 
-/** Complete rendered result byte ceiling, including both MCP surfaces. */
-const DELIVERY_LIMIT_BYTES = 24_000;
+/** A record whose own JSON (one surface, no envelope or enrichment) exceeds this is outlined. */
+const RECORD_LIMIT_BYTES = 24_000;
+/** Complete outline or fragment reply ceiling, including both MCP surfaces and enrichment. */
+const CONTENT_REPLY_LIMIT_BYTES = 24_000;
 const ValueTypeSchema = z.enum(['object', 'array', 'string', 'number', 'boolean', 'null']);
 /** Recursive continuation metadata; fragments concatenate before one JSON parse. */
 const ContentPageSchema = z.object({
@@ -118,6 +120,9 @@ function json(value: unknown): string {
   if (text === undefined) throw internalError('Selected payload contains a non-JSON value.');
   return text;
 }
+function jsonBytes(value: unknown): number {
+  return Buffer.byteLength(json(value));
+}
 function typeOf(value: unknown): z.infer<typeof ValueTypeSchema> {
   return value === null
     ? 'null'
@@ -170,7 +175,11 @@ function renderEnrichment(values: object): string {
 export interface DeliveryOptions<T extends object, E extends object = object> {
   /** Apply exactly the measured values once; do not append late total/truncation metadata. */
   applyEnrichment?: ((values: E) => void) | undefined;
-  /** Rebuild the domain page/cursor for the actual count; zero is never selected. */
+  /**
+   * Rebuild the domain page/cursor for the first `count` whole records. Exactly one array (the
+   * records) may grow with `count`; delivery calls `repage(count - 1)` to locate it, so zero must
+   * build, but an empty page is never selected.
+   */
   collection?: { count: number; repage: (count: number) => T } | undefined;
   contentCursor?: string | undefined;
   enrichment?: E | undefined;
@@ -191,8 +200,8 @@ function renderedBytes(
   options: Pick<DeliveryOptions<object>, 'enrichment' | 'enrichmentText' | 'format'> = {},
 ): number {
   const structuredContent = { ...value, ...options.enrichment };
-  const structuredBytes = Buffer.byteLength(json(structuredContent));
-  if (structuredBytes > DELIVERY_LIMIT_BYTES) return structuredBytes;
+  const structuredBytes = jsonBytes(structuredContent);
+  if (structuredBytes > CONTENT_REPLY_LIMIT_BYTES) return structuredBytes;
   const content = (options.format ?? formatData)(value);
   if (options.enrichment && Object.keys(options.enrichment).length)
     content.push({
@@ -247,27 +256,56 @@ function safeEnd(text: string, start: number, proposed: number): number {
     end--;
   return end;
 }
-/** Fit whole collection items first, then recursively deliver only an indivisible oversized payload. */
+/** Collect arrays one element longer than at the previous count; an array absent there had none. */
+function grownArrays(current: unknown, previous: unknown, found: unknown[][]): void {
+  if (Array.isArray(current)) {
+    const before = previous === undefined ? [] : previous;
+    if (Array.isArray(before) && current.length === before.length + 1) found.push(current);
+    return;
+  }
+  if (current === null || typeof current !== 'object') return;
+  if (previous === null || typeof previous !== 'object' || Array.isArray(previous)) return;
+  for (const [key, child] of Object.entries(current))
+    grownArrays(
+      child,
+      Object.hasOwn(previous, key) ? Reflect.get(previous, key) : undefined,
+      found,
+    );
+}
+/**
+ * Select whole records up to the first oversized one; an oversized leading record or single
+ * payload is delivered as a lossless recursive outline instead.
+ */
 export function deliverPayload<T extends object, E extends object = object>(
   initialPayload: T,
   options: DeliveryOptions<T, E>,
 ): (T & { delivery: 'full' }) | ContentDelivery {
   let payload = initialPayload;
+  let oversized: boolean;
+  if (options.collection && options.collection.count > 0) {
+    const { count, repage } = options.collection;
+    const page = repage(count);
+    const found: unknown[][] = [];
+    grownArrays(page, repage(count - 1), found);
+    const records = found.length === 1 ? found[0] : undefined;
+    if (records?.length !== count)
+      throw internalError('A collection repage must grow exactly one record array per count.');
+    const first = records.findIndex((record) => jsonBytes(record) > RECORD_LIMIT_BYTES);
+    // A page stops before an oversized record; one that leads the page is served alone.
+    payload = first === -1 ? page : repage(Math.max(first, 1));
+    oversized = first === 0;
+  } else {
+    // A continuation reads only its subtree; sizing the whole payload again would serialize all of it.
+    oversized = !options.contentCursor && jsonBytes(payload) > RECORD_LIMIT_BYTES;
+  }
   let enrichment = options.enrichmentFor?.(payload) ?? options.enrichment;
   const measure = (value: object) => renderedBytes(value, { ...options, enrichment });
   const finish = <R extends object>(value: R): R => {
     if (enrichment) options.applyEnrichment?.(enrichment);
     return value;
   };
-  if (options.collection && options.collection.count > 0) {
-    for (let count = options.collection.count; count >= 1; count--) {
-      payload = options.collection.repage(count);
-      enrichment = options.enrichmentFor?.(payload) ?? options.enrichment;
-      if (measure({ ...payload, delivery: 'full' }) <= DELIVERY_LIMIT_BYTES) break;
-    }
-  }
-  const full = { ...payload, delivery: 'full' as const };
-  if (!options.contentCursor && measure(full) <= DELIVERY_LIMIT_BYTES) return finish(full);
+  if (!options.contentCursor && !oversized)
+    return finish({ ...payload, delivery: 'full' as const });
   const binding = digest({ tool: options.tool, selection: options.selection });
   let revision = digest(payload, true);
   const cursor = options.contentCursor
@@ -275,7 +313,7 @@ export function deliverPayload<T extends object, E extends object = object>(
     : { v: 1 as const, binding, revision, path: '', arm: 'entries' as const, offset: 0 };
   if (cursor.binding !== binding) return invalidCursor();
   if (cursor.revision !== revision && options.collection) {
-    // Earlier renderers may have selected a smaller prefix under the same byte budget.
+    // A content cursor minted for a shorter prefix of this collection resumes against that prefix.
     for (let count = 1; count <= options.collection.count; count++) {
       const previous = options.collection.repage(count);
       const previousRevision = digest(previous, true);
@@ -289,9 +327,6 @@ export function deliverPayload<T extends object, E extends object = object>(
   if (cursor.revision !== revision)
     throw conflict('The selected source changed during content retrieval.', {
       reason: 'source_changed',
-      recovery: {
-        hint: 'Repeat the same tool with its original filters and no contentCursor, then follow the new content cursors.',
-      },
     });
   const selected = pointerValue(payload, cursor.path);
   const valueType = typeOf(selected);
@@ -315,7 +350,7 @@ export function deliverPayload<T extends object, E extends object = object>(
   };
   const retrieval = `Repeat ${options.tool} with the same original filters, mode, collection cursor and effective limit plus each contentCursor. Decode a descriptor's jsonValue directly when present, or follow its contentCursor for the same value. Reconstruct this payload before advancing the collection cursor. Concatenate consecutive fragments before JSON-decoding once.`;
   const fits = (value: ContentDelivery): boolean => {
-    if (measure(value) <= DELIVERY_LIMIT_BYTES) return true;
+    if (measure(value) <= CONTENT_REPLY_LIMIT_BYTES) return true;
     const metadataOnly: ContentDelivery = {
       ...retained,
       delivery: 'outline',
@@ -324,7 +359,7 @@ export function deliverPayload<T extends object, E extends object = object>(
     };
     const firstDescriptor = value.delivery === 'outline' && value.contentPage.entries?.length === 1;
     if (
-      (measure(metadataOnly) > DELIVERY_LIMIT_BYTES || firstDescriptor) &&
+      (measure(metadataOnly) > CONTENT_REPLY_LIMIT_BYTES || firstDescriptor) &&
       context?.source &&
       retained.provenance &&
       'url' in retained.provenance
@@ -341,7 +376,7 @@ export function deliverPayload<T extends object, E extends object = object>(
       };
       value.provenance = retained.provenance;
     }
-    return measure(value) <= DELIVERY_LIMIT_BYTES;
+    return measure(value) <= CONTENT_REPLY_LIMIT_BYTES;
   };
   const makeCursor = (path: string, arm: 'entries' | 'fragment', offset: number) =>
     encodeCursor({ v: 1, binding, revision, path, arm, offset });
@@ -375,7 +410,7 @@ export function deliverPayload<T extends object, E extends object = object>(
       entries.push({
         path,
         valueType,
-        sizeBytes: Buffer.byteLength(json(value)),
+        sizeBytes: jsonBytes(value),
         contentCursor: makeCursor(
           path,
           valueType === 'object' || valueType === 'array' ? 'entries' : 'fragment',
@@ -400,7 +435,7 @@ export function deliverPayload<T extends object, E extends object = object>(
     }
     if (!result) throw internalError('A content descriptor cannot fit the response envelope.');
     for (const entry of result.contentPage.entries) {
-      if (entry.sizeBytes > DELIVERY_LIMIT_BYTES) continue;
+      if (entry.sizeBytes > CONTENT_REPLY_LIMIT_BYTES) continue;
       const encoded = json(pointerValue(payload, entry.path));
       entry.jsonValue = encoded;
       if (!fits(result)) delete entry.jsonValue;
@@ -419,7 +454,7 @@ export function deliverPayload<T extends object, E extends object = object>(
     safeEnd(text, cursor.offset, cursor.offset + 1) === cursor.offset
       ? cursor.offset + 2
       : cursor.offset + 1;
-  let end = safeEnd(text, cursor.offset, cursor.offset + DELIVERY_LIMIT_BYTES);
+  let end = safeEnd(text, cursor.offset, cursor.offset + CONTENT_REPLY_LIMIT_BYTES);
   while (end > cursor.offset) {
     const candidate: ContentDelivery = {
       ...retained,
@@ -444,7 +479,7 @@ export function deliverPayload<T extends object, E extends object = object>(
       contentPage: { ...candidate.contentPage, fragment: '' },
     });
     const bytes = measure(candidate);
-    const available = Math.max(0, DELIVERY_LIMIT_BYTES - overhead);
+    const available = Math.max(0, CONTENT_REPLY_LIMIT_BYTES - overhead);
     const units = Math.floor(((end - cursor.offset) * available) / (bytes - overhead)) - 1;
     end = Math.max(
       minimumEnd,

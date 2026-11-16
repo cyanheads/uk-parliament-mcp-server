@@ -58,17 +58,24 @@ export const LICENCE_URL =
 /** Required attribution and exclusions, suitable for both client surfaces. */
 export const LICENCE_NOTICE =
   'Contains Parliamentary information licensed under the Open Parliament Licence v3.0 where applicable. Personal data, parliamentary marks and third-party rights are excluded. Independent software; no parliamentary endorsement.';
-/** Provenance for a selected official response. */
-export const SourceSchema = z.object({
-  api: ApiSchema.describe('Official API namespace.'),
-  url: z.string().describe('Actual official HTTPS request URL.'),
-  retrievedAt: z.iso.datetime().describe('Response retrieval time in ISO 8601 UTC.'),
-  licenceUrl: z.string().describe('Open Parliament Licence HTTPS URL; its exclusions still apply.'),
-  notices: z
-    .array(z.string().describe('Source notice preserved verbatim.'))
-    .optional()
-    .describe('Source-specific notices.'),
-});
+/**
+ * Provenance for a selected official response. Its `id` hoists it into each tool's `outputSchema`
+ * `$defs`, so every provenance path references one copy.
+ */
+export const SourceSchema = z
+  .object({
+    api: ApiSchema.describe('Official API namespace.'),
+    url: z.string().describe('Actual official HTTPS request URL.'),
+    retrievedAt: z.iso.datetime().describe('Response retrieval time in ISO 8601 UTC.'),
+    licenceUrl: z
+      .string()
+      .describe('Open Parliament Licence HTTPS URL; its exclusions still apply.'),
+    notices: z
+      .array(z.string().describe('Source notice preserved verbatim.'))
+      .optional()
+      .describe('Source-specific notices.'),
+  })
+  .meta({ id: 'Source' });
 /** Official response provenance. */
 export type Source = z.infer<typeof SourceSchema>;
 /** A published link, never implicitly downloaded. */
@@ -87,21 +94,23 @@ export const LinkSchema = z.object({
 });
 /** Published document link. */
 export type Link = z.infer<typeof LinkSchema>;
-/** Whole-item collection continuation, distinct from content continuation. */
-export const PageSchema = z.object({
-  returned: z.number().int().nonnegative().describe('Whole items emitted on this page.'),
-  hasMore: z.boolean().describe('Further collection items remain.'),
-  nextCursor: z
-    .string()
-    .optional()
-    .describe('Opaque collection continuation; repeat the same filters.'),
-  total: z
-    .number()
-    .int()
-    .nonnegative()
-    .optional()
-    .describe('Total supplied by the source or fully read local collection.'),
-});
+/** Whole-item collection continuation, distinct from content continuation; one `$defs` entry. */
+export const PageSchema = z
+  .object({
+    returned: z.number().int().nonnegative().describe('Whole items emitted on this page.'),
+    hasMore: z.boolean().describe('Further collection items remain.'),
+    nextCursor: z
+      .string()
+      .optional()
+      .describe('Opaque collection continuation; repeat the same filters.'),
+    total: z
+      .number()
+      .int()
+      .nonnegative()
+      .optional()
+      .describe('Total supplied by the source or fully read local collection.'),
+  })
+  .meta({ id: 'Page' });
 /** Whole-item collection page. */
 export type Page = z.infer<typeof PageSchema>;
 /** Shared caller workload request; clamp to each collection cap after parsing. */

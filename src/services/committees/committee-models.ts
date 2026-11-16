@@ -296,6 +296,9 @@ type SubmitterTypeRaw = string;
 const SubmitterTypeRawSchema = z.string();
 type FileDataFormatRaw = string;
 const FileDataFormatRawSchema = z.string();
+/** Measured on evidence 165562: 14,454 on its docx, Pdf and Html entries; the Html rendition is 21,953 bytes. */
+const FILE_SIZE_DESCRIPTION =
+  "Source-reported size in bytes of the uploaded original, repeated on each rendition of the same document, so it can differ from a Pdf or Html rendition's own size; null when unknown.";
 interface DocumentPurposeRaw {
   description?: string | null | undefined;
   id: number;
@@ -985,11 +988,7 @@ const ActivityPersonRawSchema: z.ZodType<ActivityPersonRaw> = z.lazy(() =>
 const DocumentFileRawSchema: z.ZodType<DocumentFileRaw> = z.lazy(() =>
   z.object({
     fileName: z.string().nullish().describe('Gets or sets the name of the file.'),
-    fileSize: z
-      .number()
-      .int()
-      .nullish()
-      .describe('Gets or sets the size of the file in bytes. Nullable if the size is unknown.'),
+    fileSize: z.number().int().nullish().describe(FILE_SIZE_DESCRIPTION),
     fileDataFormat: FileDataFormatRawSchema.nullish().describe(
       'Published source value; null or omission preserves absence.',
     ),
@@ -1048,49 +1047,33 @@ const DocumentPurposeRawSchema: z.ZodType<DocumentPurposeRaw> = z.lazy(() =>
       .describe('Gets or sets the sort order for the document purpose.'),
   }),
 );
+/** Discriminator and record pointer that open every flattened entity node. */
+const nodeHeader = <const K extends string>(kind: K) => ({
+  kind: z.literal(kind).describe('Source entity type.'),
+  sourcePath: z.string().describe('JSON pointer to this entity in the record.'),
+});
+/** Pointer to the entity at a single-valued source relationship. */
+const pathTo = (relation: string) => z.string().nullish().describe(`sourcePath of ${relation}.`);
+/** Pointers to the entities at a list-valued source relationship, in source order. */
+const pathsTo = (relation: string, item = 'child sourcePath') =>
+  z
+    .array(z.string().describe(`Ordered ${item}.`))
+    .nullish()
+    .describe(`sourcePaths of ${relation}.`);
 const CommitteeDetailsNodeSchema = z
   .object({
-    kind: z.literal('CommitteeDetails').describe('Official source entity type.'),
-    sourcePath: z.string().describe('Exact JSON pointer into this whole selected source record.'),
-    contactPath: z
-      .string()
-      .nullish()
-      .describe('Source pointer relationship for contact; null/omission preserves source absence.'),
+    ...nodeHeader('CommitteeDetails'),
+    contactPath: pathTo('contact'),
     id: z.number().int().describe('The ID of the committee.'),
     name: z.string().nullish().describe('The current name of the committee.'),
-    parentCommitteePath: z
-      .string()
-      .nullish()
-      .describe(
-        'Source pointer relationship for parentCommittee; null/omission preserves source absence.',
-      ),
-    subCommitteesPaths: z
-      .array(z.string().describe('Ordered child source pointer.'))
-      .nullish()
-      .describe(
-        'Source pointer relationship for subCommittees; null/omission preserves source absence.',
-      ),
+    parentCommitteePath: pathTo('parentCommittee'),
+    subCommitteesPaths: pathsTo('subCommittees'),
     house: HouseRawSchema.nullish().describe(
       'Published source value; null or omission preserves absence.',
     ),
-    leadHousePath: z
-      .string()
-      .nullish()
-      .describe(
-        'Source pointer relationship for leadHouse; null/omission preserves source absence.',
-      ),
-    categoryPath: z
-      .string()
-      .nullish()
-      .describe(
-        'Source pointer relationship for category; null/omission preserves source absence.',
-      ),
-    committeeTypesPaths: z
-      .array(z.string().describe('Ordered child source pointer.'))
-      .nullish()
-      .describe(
-        'Source pointer relationship for committeeTypes; null/omission preserves source absence.',
-      ),
+    leadHousePath: pathTo('leadHouse'),
+    categoryPath: pathTo('category'),
+    committeeTypesPaths: pathsTo('committeeTypes'),
     showOnWebsite: z
       .boolean()
       .nullish()
@@ -1115,166 +1098,72 @@ const CommitteeDetailsNodeSchema = z
       .string()
       .nullish()
       .describe('The date the committee was appointed by the House of Lords.'),
-    scrutinisingDepartmentsPaths: z
-      .array(z.string().describe('Ordered child source pointer.'))
-      .nullish()
-      .describe(
-        'Source pointer relationship for scrutinisingDepartments; null/omission preserves source absence.',
-      ),
+    scrutinisingDepartmentsPaths: pathsTo('scrutinisingDepartments'),
     isLeadCommittee: z
       .boolean()
       .nullish()
       .describe(
         'Indicates whether this is the lead committee, if linked to an event with multiple committees.',
       ),
-    nameHistoryPaths: z
-      .array(z.string().describe('Ordered child source pointer.'))
-      .nullish()
-      .describe(
-        'Source pointer relationship for nameHistory; null/omission preserves source absence.',
-      ),
-    bannerPath: z
-      .string()
-      .nullish()
-      .describe('Source pointer relationship for banner; null/omission preserves source absence.'),
-    contentLinksPaths: z
-      .array(z.string().describe('Ordered child source pointer.'))
-      .nullish()
-      .describe(
-        'Source pointer relationship for contentLinks; null/omission preserves source absence.',
-      ),
+    nameHistoryPaths: pathsTo('nameHistory'),
+    bannerPath: pathTo('banner'),
+    contentLinksPaths: pathsTo('contentLinks'),
     purpose: z.string().nullish().describe('Gets or sets the purpose of the committee.'),
-    previousCommitteesPaths: z
-      .array(z.string().describe('Ordered child source pointer.'))
-      .nullish()
-      .describe(
-        'Source pointer relationship for previousCommittees; null/omission preserves source absence.',
-      ),
+    previousCommitteesPaths: pathsTo('previousCommittees'),
   })
-  .describe('Complete CommitteeDetails metadata and source-path relationships.');
+  .describe('Complete CommitteeDetails entity.');
 const CommitteeMemberNodeSchema = z
   .object({
-    kind: z.literal('CommitteeMember').describe('Official source entity type.'),
-    sourcePath: z.string().describe('Exact JSON pointer into this whole selected source record.'),
+    ...nodeHeader('CommitteeMember'),
     id: z.number().int().describe('Gets or sets the unique identifier for the person.'),
     personId: z.number().int().nullish().describe('Gets or sets the optional person ID.'),
     name: z.string().nullish().describe('Gets or sets the name of the person.'),
     photoUrl: z.string().nullish().describe("Gets or sets the URL of the person's photo."),
-    memberInfoPath: z
-      .string()
-      .nullish()
-      .describe(
-        'Source pointer relationship for memberInfo; null/omission preserves source absence.',
-      ),
+    memberInfoPath: pathTo('memberInfo'),
     isLayMember: z
       .boolean()
       .nullish()
       .describe('Gets or sets a value indicating whether the member is a lay member.'),
-    rolesPaths: z
-      .array(z.string().describe('Ordered child source pointer.'))
-      .nullish()
-      .describe('Source pointer relationship for roles; null/omission preserves source absence.'),
+    rolesPaths: pathsTo('roles'),
   })
-  .describe('Complete CommitteeMember metadata and source-path relationships.');
+  .describe('Complete CommitteeMember entity.');
 const CommitteeBusinessDetailsNodeSchema = z
   .object({
-    kind: z.literal('CommitteeBusinessDetails').describe('Official source entity type.'),
-    sourcePath: z.string().describe('Exact JSON pointer into this whole selected source record.'),
+    ...nodeHeader('CommitteeBusinessDetails'),
     id: z.number().int().describe('Id of committee business.'),
     title: z.string().nullish().describe('Title of committee business.'),
-    typePath: z
-      .string()
-      .nullish()
-      .describe('Source pointer relationship for type; null/omission preserves source absence.'),
+    typePath: pathTo('type'),
     openDate: z.string().nullish().describe('Date the business started.'),
     closeDate: z.string().nullish().describe('Date the business ended.'),
-    latestReportPath: z
-      .string()
-      .nullish()
-      .describe(
-        'Source pointer relationship for latestReport; null/omission preserves source absence.',
-      ),
-    openSubmissionPeriodsPaths: z
-      .array(z.string().describe('Ordered child source pointer.'))
-      .nullish()
-      .describe(
-        'Source pointer relationship for openSubmissionPeriods; null/omission preserves source absence.',
-      ),
-    closedSubmissionPeriodsPaths: z
-      .array(z.string().describe('Ordered child source pointer.'))
-      .nullish()
-      .describe(
-        'Source pointer relationship for closedSubmissionPeriods; null/omission preserves source absence.',
-      ),
-    nextOralEvidenceSessionPath: z
-      .string()
-      .nullish()
-      .describe(
-        'Source pointer relationship for nextOralEvidenceSession; null/omission preserves source absence.',
-      ),
-    contactPath: z
-      .string()
-      .nullish()
-      .describe('Source pointer relationship for contact; null/omission preserves source absence.'),
+    latestReportPath: pathTo('latestReport'),
+    openSubmissionPeriodsPaths: pathsTo('openSubmissionPeriods'),
+    closedSubmissionPeriodsPaths: pathsTo('closedSubmissionPeriods'),
+    nextOralEvidenceSessionPath: pathTo('nextOralEvidenceSession'),
+    contactPath: pathTo('contact'),
     scope: z.string().nullish().describe('Gets or sets the scope of the committee business.'),
-    relatedInformationPaths: z
-      .array(z.string().describe('Ordered child source pointer.'))
-      .nullish()
-      .describe(
-        'Source pointer relationship for relatedInformation; null/omission preserves source absence.',
-      ),
-    bannerPath: z
-      .string()
-      .nullish()
-      .describe('Source pointer relationship for banner; null/omission preserves source absence.'),
-    hcNumbersPaths: z
-      .array(z.string().describe('Ordered child source pointer.'))
-      .nullish()
-      .describe(
-        'Source pointer relationship for hcNumbers; null/omission preserves source absence.',
-      ),
+    relatedInformationPaths: pathsTo('relatedInformation'),
+    bannerPath: pathTo('banner'),
+    hcNumbersPaths: pathsTo('hcNumbers'),
   })
-  .describe('Complete CommitteeBusinessDetails metadata and source-path relationships.');
+  .describe('Complete CommitteeBusinessDetails entity.');
 const PublicationNodeSchema = z
   .object({
-    kind: z.literal('Publication').describe('Official source entity type.'),
-    sourcePath: z.string().describe('Exact JSON pointer into this whole selected source record.'),
+    ...nodeHeader('Publication'),
     description: z.string().nullish().describe('Description of publication.'),
     id: z.number().int().describe('The ID of the publication.'),
     publicationStartDate: z
       .string()
       .nullish()
       .describe('Date when publication can be published from.'),
-    governmentResponsesPath: z
-      .string()
-      .nullish()
-      .describe(
-        'Source pointer relationship for governmentResponses; null/omission preserves source absence.',
-      ),
+    governmentResponsesPath: pathTo('governmentResponses'),
     publicationEndDate: z
       .string()
       .nullish()
       .describe('Date when publication can be published until.'),
-    documentsPaths: z
-      .array(z.string().describe('Ordered child source pointer.'))
-      .nullish()
-      .describe(
-        'Source pointer relationship for documents; null/omission preserves source absence.',
-      ),
-    hcNumberPath: z
-      .string()
-      .nullish()
-      .describe(
-        'Source pointer relationship for hcNumber; null/omission preserves source absence.',
-      ),
-    hlPaperPath: z
-      .string()
-      .nullish()
-      .describe('Source pointer relationship for hlPaper; null/omission preserves source absence.'),
-    typePath: z
-      .string()
-      .nullish()
-      .describe('Source pointer relationship for type; null/omission preserves source absence.'),
+    documentsPaths: pathsTo('documents'),
+    hcNumberPath: pathTo('hcNumber'),
+    hlPaperPath: pathTo('hlPaper'),
+    typePath: pathTo('type'),
     responseToPublicationId: z
       .number()
       .int()
@@ -1288,79 +1177,39 @@ const PublicationNodeSchema = z
       .string()
       .nullish()
       .describe('Second URL for additional content related to the publication.'),
-    respondingDepartmentPath: z
-      .string()
-      .nullish()
-      .describe(
-        'Source pointer relationship for respondingDepartment; null/omission preserves source absence.',
-      ),
-    businessesPaths: z
-      .array(z.string().describe('Ordered child source pointer.'))
-      .nullish()
-      .describe(
-        'Source pointer relationship for businesses; null/omission preserves source absence.',
-      ),
+    respondingDepartmentPath: pathTo('respondingDepartment'),
+    businessesPaths: pathsTo('businesses'),
     committeePath: z
       .string()
       .nullish()
       .describe(
-        'Source pointer relationship for committee; null/omission preserves source absence.',
+        'sourcePath of committee. mode=publications items omit it with the committee entity; mode=publication returns it.',
       ),
   })
-  .describe('Complete Publication metadata and source-path relationships.');
+  .describe('Complete Publication entity.');
 const ContactInformationNodeSchema = z
   .object({
-    kind: z.literal('ContactInformation').describe('Official source entity type.'),
-    sourcePath: z.string().describe('Exact JSON pointer into this whole selected source record.'),
+    ...nodeHeader('ContactInformation'),
     email: z.string().nullish().describe('Current contact email.'),
     phone: z.string().nullish().describe('Telephone number.'),
     address: z.string().nullish().describe('Postal address.'),
     contactDisclaimer: z.string().nullish().describe('Disclaimer for contact information.'),
   })
-  .describe('Complete ContactInformation metadata and source-path relationships.');
+  .describe('Complete ContactInformation entity.');
 const CommitteeSummaryNodeSchema = z
   .object({
-    kind: z.literal('CommitteeSummary').describe('Official source entity type.'),
-    sourcePath: z.string().describe('Exact JSON pointer into this whole selected source record.'),
-    contactPath: z
-      .string()
-      .nullish()
-      .describe('Source pointer relationship for contact; null/omission preserves source absence.'),
+    ...nodeHeader('CommitteeSummary'),
+    contactPath: pathTo('contact'),
     id: z.number().int().describe('The ID of the committee.'),
     name: z.string().nullish().describe('The current name of the committee.'),
-    parentCommitteePath: z
-      .string()
-      .nullish()
-      .describe(
-        'Source pointer relationship for parentCommittee; null/omission preserves source absence.',
-      ),
-    subCommitteesPaths: z
-      .array(z.string().describe('Ordered child source pointer.'))
-      .nullish()
-      .describe(
-        'Source pointer relationship for subCommittees; null/omission preserves source absence.',
-      ),
+    parentCommitteePath: pathTo('parentCommittee'),
+    subCommitteesPaths: pathsTo('subCommittees'),
     house: HouseRawSchema.nullish().describe(
       'Published source value; null or omission preserves absence.',
     ),
-    leadHousePath: z
-      .string()
-      .nullish()
-      .describe(
-        'Source pointer relationship for leadHouse; null/omission preserves source absence.',
-      ),
-    categoryPath: z
-      .string()
-      .nullish()
-      .describe(
-        'Source pointer relationship for category; null/omission preserves source absence.',
-      ),
-    committeeTypesPaths: z
-      .array(z.string().describe('Ordered child source pointer.'))
-      .nullish()
-      .describe(
-        'Source pointer relationship for committeeTypes; null/omission preserves source absence.',
-      ),
+    leadHousePath: pathTo('leadHouse'),
+    categoryPath: pathTo('category'),
+    committeeTypesPaths: pathsTo('committeeTypes'),
     showOnWebsite: z
       .boolean()
       .nullish()
@@ -1385,30 +1234,19 @@ const CommitteeSummaryNodeSchema = z
       .string()
       .nullish()
       .describe('The date the committee was appointed by the House of Lords.'),
-    scrutinisingDepartmentsPaths: z
-      .array(z.string().describe('Ordered child source pointer.'))
-      .nullish()
-      .describe(
-        'Source pointer relationship for scrutinisingDepartments; null/omission preserves source absence.',
-      ),
+    scrutinisingDepartmentsPaths: pathsTo('scrutinisingDepartments'),
     isLeadCommittee: z
       .boolean()
       .nullish()
       .describe(
         'Indicates whether this is the lead committee, if linked to an event with multiple committees.',
       ),
-    nameHistoryPaths: z
-      .array(z.string().describe('Ordered child source pointer.'))
-      .nullish()
-      .describe(
-        'Source pointer relationship for nameHistory; null/omission preserves source absence.',
-      ),
+    nameHistoryPaths: pathsTo('nameHistory'),
   })
-  .describe('Complete CommitteeSummary metadata and source-path relationships.');
+  .describe('Complete CommitteeSummary entity.');
 const LeadHouseNodeSchema = z
   .object({
-    kind: z.literal('LeadHouse').describe('Official source entity type.'),
-    sourcePath: z.string().describe('Exact JSON pointer into this whole selected source record.'),
+    ...nodeHeader('LeadHouse'),
     isCommons: z
       .boolean()
       .nullish()
@@ -1418,33 +1256,25 @@ const LeadHouseNodeSchema = z
       .nullish()
       .describe('Gets or sets a value indicating whether the lead house is the House of Lords.'),
   })
-  .describe('Complete LeadHouse metadata and source-path relationships.');
+  .describe('Complete LeadHouse entity.');
 const CommitteeCategoryNodeSchema = z
   .object({
-    kind: z.literal('CommitteeCategory').describe('Official source entity type.'),
-    sourcePath: z.string().describe('Exact JSON pointer into this whole selected source record.'),
+    ...nodeHeader('CommitteeCategory'),
     id: z.number().int().describe('Gets or sets the unique identifier for the committee category.'),
     name: z.string().nullish().describe('Gets or sets the name of the committee category.'),
   })
-  .describe('Complete CommitteeCategory metadata and source-path relationships.');
+  .describe('Complete CommitteeCategory entity.');
 const CommitteeTypeNodeSchema = z
   .object({
-    kind: z.literal('CommitteeType').describe('Official source entity type.'),
-    sourcePath: z.string().describe('Exact JSON pointer into this whole selected source record.'),
+    ...nodeHeader('CommitteeType'),
     id: z.number().int().describe('Gets or sets the unique identifier for the committee type.'),
     name: z.string().nullish().describe('Gets or sets the name of the committee type.'),
-    committeeCategoryPath: z
-      .string()
-      .nullish()
-      .describe(
-        'Source pointer relationship for committeeCategory; null/omission preserves source absence.',
-      ),
+    committeeCategoryPath: pathTo('committeeCategory'),
   })
-  .describe('Complete CommitteeType metadata and source-path relationships.');
+  .describe('Complete CommitteeType entity.');
 const ScrutinisingDepartmentNodeSchema = z
   .object({
-    kind: z.literal('ScrutinisingDepartment').describe('Official source entity type.'),
-    sourcePath: z.string().describe('Exact JSON pointer into this whole selected source record.'),
+    ...nodeHeader('ScrutinisingDepartment'),
     departmentId: z
       .number()
       .int()
@@ -1455,11 +1285,10 @@ const ScrutinisingDepartmentNodeSchema = z
       .nullish()
       .describe('The name of the department which this committee scrutinises.'),
   })
-  .describe('Complete ScrutinisingDepartment metadata and source-path relationships.');
+  .describe('Complete ScrutinisingDepartment entity.');
 const CommitteeNameNodeSchema = z
   .object({
-    kind: z.literal('CommitteeName').describe('Official source entity type.'),
-    sourcePath: z.string().describe('Exact JSON pointer into this whole selected source record.'),
+    ...nodeHeader('CommitteeName'),
     id: z.number().int().describe('Gets or sets the unique identifier for the committee name.'),
     committeeId: z
       .number()
@@ -1473,39 +1302,26 @@ const CommitteeNameNodeSchema = z
       .nullish()
       .describe('Gets or sets the end date of the committee, if applicable.'),
   })
-  .describe('Complete CommitteeName metadata and source-path relationships.');
+  .describe('Complete CommitteeName entity.');
 const BannerNodeSchema = z
   .object({
-    kind: z.literal('Banner').describe('Official source entity type.'),
-    sourcePath: z.string().describe('Exact JSON pointer into this whole selected source record.'),
-    desktopBannerPath: z
-      .string()
-      .nullish()
-      .describe(
-        'Source pointer relationship for desktopBanner; null/omission preserves source absence.',
-      ),
-    mobileBannerPath: z
-      .string()
-      .nullish()
-      .describe(
-        'Source pointer relationship for mobileBanner; null/omission preserves source absence.',
-      ),
+    ...nodeHeader('Banner'),
+    desktopBannerPath: pathTo('desktopBanner'),
+    mobileBannerPath: pathTo('mobileBanner'),
   })
-  .describe('Complete Banner metadata and source-path relationships.');
+  .describe('Complete Banner entity.');
 const ContentLinkNodeSchema = z
   .object({
-    kind: z.literal('ContentLink').describe('Official source entity type.'),
-    sourcePath: z.string().describe('Exact JSON pointer into this whole selected source record.'),
+    ...nodeHeader('ContentLink'),
     title: z.string().nullish().describe('Title of the content link.'),
     url: z.string().nullish().describe('URL of the content link.'),
     description: z.string().nullish().describe('Description of the content link.'),
     displayOrder: z.number().int().nullish().describe('Order to display the content link.'),
   })
-  .describe('Complete ContentLink metadata and source-path relationships.');
+  .describe('Complete ContentLink entity.');
 const MemberInfoNodeSchema = z
   .object({
-    kind: z.literal('MemberInfo').describe('Official source entity type.'),
-    sourcePath: z.string().describe('Exact JSON pointer into this whole selected source record.'),
+    ...nodeHeader('MemberInfo'),
     memberFrom: z.string().nullish().describe('Gets or sets the location the member represents.'),
     party: z.string().nullish().describe('Gets or sets the political party of the member.'),
     partyColour: z
@@ -1535,11 +1351,10 @@ const MemberInfoNodeSchema = z
       .nullish()
       .describe('Gets or sets a value indicating whether the member is currently active.'),
   })
-  .describe('Complete MemberInfo metadata and source-path relationships.');
+  .describe('Complete MemberInfo entity.');
 const CommitteeMemberRoleNodeSchema = z
   .object({
-    kind: z.literal('CommitteeMemberRole').describe('Official source entity type.'),
-    sourcePath: z.string().describe('Exact JSON pointer into this whole selected source record.'),
+    ...nodeHeader('CommitteeMemberRole'),
     startDate: z
       .string()
       .nullish()
@@ -1550,10 +1365,7 @@ const CommitteeMemberRoleNodeSchema = z
       .describe(
         "Gets or sets the end date of the committee member's role. Null if the role is ongoing.",
       ),
-    rolePath: z
-      .string()
-      .nullish()
-      .describe('Source pointer relationship for role; null/omission preserves source absence.'),
+    rolePath: pathTo('role'),
     exOfficio: z
       .boolean()
       .nullish()
@@ -1564,11 +1376,10 @@ const CommitteeMemberRoleNodeSchema = z
       .describe('Indicates whether the committee member is an alternate.'),
     coOpted: z.boolean().nullish().describe('Indicates whether the committee member is co-opted.'),
   })
-  .describe('Complete CommitteeMemberRole metadata and source-path relationships.');
+  .describe('Complete CommitteeMemberRole entity.');
 const CommitteeBusinessTypeNodeSchema = z
   .object({
-    kind: z.literal('CommitteeBusinessType').describe('Official source entity type.'),
-    sourcePath: z.string().describe('Exact JSON pointer into this whole selected source record.'),
+    ...nodeHeader('CommitteeBusinessType'),
     id: z.number().int().describe('Gets or sets the unique identifier for the business type.'),
     name: z.string().nullish().describe('Gets or sets the name of the business type.'),
     isInquiry: z
@@ -1580,47 +1391,25 @@ const CommitteeBusinessTypeNodeSchema = z
       .nullish()
       .describe('Gets or sets the description of the business type.'),
   })
-  .describe('Complete CommitteeBusinessType metadata and source-path relationships.');
+  .describe('Complete CommitteeBusinessType entity.');
 const PublicationSummaryNodeSchema = z
   .object({
-    kind: z.literal('PublicationSummary').describe('Official source entity type.'),
-    sourcePath: z.string().describe('Exact JSON pointer into this whole selected source record.'),
+    ...nodeHeader('PublicationSummary'),
     description: z.string().nullish().describe('Description of publication.'),
     id: z.number().int().describe('The ID of the publication.'),
     publicationStartDate: z
       .string()
       .nullish()
       .describe('Date when publication can be published from.'),
-    governmentResponsesPath: z
-      .string()
-      .nullish()
-      .describe(
-        'Source pointer relationship for governmentResponses; null/omission preserves source absence.',
-      ),
+    governmentResponsesPath: pathTo('governmentResponses'),
     publicationEndDate: z
       .string()
       .nullish()
       .describe('Date when publication can be published until.'),
-    documentsPaths: z
-      .array(z.string().describe('Ordered child source pointer.'))
-      .nullish()
-      .describe(
-        'Source pointer relationship for documents; null/omission preserves source absence.',
-      ),
-    hcNumberPath: z
-      .string()
-      .nullish()
-      .describe(
-        'Source pointer relationship for hcNumber; null/omission preserves source absence.',
-      ),
-    hlPaperPath: z
-      .string()
-      .nullish()
-      .describe('Source pointer relationship for hlPaper; null/omission preserves source absence.'),
-    typePath: z
-      .string()
-      .nullish()
-      .describe('Source pointer relationship for type; null/omission preserves source absence.'),
+    documentsPaths: pathsTo('documents'),
+    hcNumberPath: pathTo('hcNumber'),
+    hlPaperPath: pathTo('hlPaper'),
+    typePath: pathTo('type'),
     responseToPublicationId: z
       .number()
       .int()
@@ -1634,18 +1423,12 @@ const PublicationSummaryNodeSchema = z
       .string()
       .nullish()
       .describe('Second URL for additional content related to the publication.'),
-    respondingDepartmentPath: z
-      .string()
-      .nullish()
-      .describe(
-        'Source pointer relationship for respondingDepartment; null/omission preserves source absence.',
-      ),
+    respondingDepartmentPath: pathTo('respondingDepartment'),
   })
-  .describe('Complete PublicationSummary metadata and source-path relationships.');
+  .describe('Complete PublicationSummary entity.');
 const SubmissionPeriodSummaryNodeSchema = z
   .object({
-    kind: z.literal('SubmissionPeriodSummary').describe('Official source entity type.'),
-    sourcePath: z.string().describe('Exact JSON pointer into this whole selected source record.'),
+    ...nodeHeader('SubmissionPeriodSummary'),
     id: z.number().int().describe('Id of the submission period.'),
     startDate: z.string().nullish().describe('Submission period start date.'),
     endDate: z.string().nullish().describe('Submission period end date.'),
@@ -1667,11 +1450,10 @@ const SubmissionPeriodSummaryNodeSchema = z
         'Whether submissions are allowed past the deadline if the form is accessed via direct link.',
       ),
   })
-  .describe('Complete SubmissionPeriodSummary metadata and source-path relationships.');
+  .describe('Complete SubmissionPeriodSummary entity.');
 const ActivitySummaryNodeSchema = z
   .object({
-    kind: z.literal('ActivitySummary').describe('Official source entity type.'),
-    sourcePath: z.string().describe('Exact JSON pointer into this whole selected source record.'),
+    ...nodeHeader('ActivitySummary'),
     id: z.number().int().describe('The id of the activity.'),
     name: z.string().nullish().describe('The name of the activity.'),
     startDate: z.string().nullish().describe('The datetime the activity starts.'),
@@ -1683,26 +1465,19 @@ const ActivitySummaryNodeSchema = z
       .describe('The id of the event this activity is attached to.'),
     isPrivate: z.boolean().nullish().describe('Whether an activity is private or public.'),
     activityType: z.string().nullish().describe('Type of activity.'),
-    attendeesPaths: z
-      .array(z.string().describe('Ordered child source pointer.'))
-      .nullish()
-      .describe(
-        'Source pointer relationship for attendees; null/omission preserves source absence.',
-      ),
+    attendeesPaths: pathsTo('attendees'),
   })
-  .describe('Complete ActivitySummary metadata and source-path relationships.');
+  .describe('Complete ActivitySummary entity.');
 const LinksNodeSchema = z
   .object({
-    kind: z.literal('Links').describe('Official source entity type.'),
-    sourcePath: z.string().describe('Exact JSON pointer into this whole selected source record.'),
+    ...nodeHeader('Links'),
     url: z.string().nullish().describe('Gets or sets the URL of the link.'),
     description: z.string().nullish().describe('Gets or sets the description of the link.'),
   })
-  .describe('Complete Links metadata and source-path relationships.');
+  .describe('Complete Links entity.');
 const HouseNumberNodeSchema = z
   .object({
-    kind: z.literal('HouseNumber').describe('Official source entity type.'),
-    sourcePath: z.string().describe('Exact JSON pointer into this whole selected source record.'),
+    ...nodeHeader('HouseNumber'),
     number: z.string().nullish().describe('Gets or sets the house number.'),
     sessionId: z
       .number()
@@ -1714,17 +1489,11 @@ const HouseNumberNodeSchema = z
       .nullish()
       .describe('Gets or sets the description of the session associated with the house number.'),
   })
-  .describe('Complete HouseNumber metadata and source-path relationships.');
+  .describe('Complete HouseNumber entity.');
 const GovernmentResponseNodeSchema = z
   .object({
-    kind: z.literal('GovernmentResponse').describe('Official source entity type.'),
-    sourcePath: z.string().describe('Exact JSON pointer into this whole selected source record.'),
-    publicationPaths: z
-      .array(z.string().describe('Ordered child source pointer.'))
-      .nullish()
-      .describe(
-        'Source pointer relationship for publication; null/omission preserves source absence.',
-      ),
+    ...nodeHeader('GovernmentResponse'),
+    publicationPaths: pathsTo('publication'),
     responseDeadline: z
       .string()
       .nullish()
@@ -1734,22 +1503,17 @@ const GovernmentResponseNodeSchema = z
       .nullish()
       .describe('Gets or sets a value indicating whether the response is expected.'),
   })
-  .describe('Complete GovernmentResponse metadata and source-path relationships.');
+  .describe('Complete GovernmentResponse entity.');
 const DocumentNodeSchema = z
   .object({
-    kind: z.literal('Document').describe('Official source entity type.'),
-    sourcePath: z.string().describe('Exact JSON pointer into this whole selected source record.'),
+    ...nodeHeader('Document'),
     documentId: z.number().int().describe('Gets or sets the unique identifier for the document.'),
-    filesPaths: z
-      .array(z.string().describe('Ordered child source pointer.'))
-      .nullish()
-      .describe('Source pointer relationship for files; null/omission preserves source absence.'),
+    filesPaths: pathsTo('files'),
   })
-  .describe('Complete Document metadata and source-path relationships.');
+  .describe('Complete Document entity.');
 const PublicationTypeNodeSchema = z
   .object({
-    kind: z.literal('PublicationType').describe('Official source entity type.'),
-    sourcePath: z.string().describe('Exact JSON pointer into this whole selected source record.'),
+    ...nodeHeader('PublicationType'),
     id: z.number().int().describe('The id of the publication type.'),
     name: z.string().nullish().describe('The name of the publication type.'),
     description: z.string().nullish().describe('The description of the publication type.'),
@@ -1767,17 +1531,13 @@ const PublicationTypeNodeSchema = z
       .describe('Icon type to be rendered on the website for this type of publication.'),
     pluralVersion: z.string().nullish().describe('Plural form of the publication type name.'),
   })
-  .describe('Complete PublicationType metadata and source-path relationships.');
+  .describe('Complete PublicationType entity.');
 const DepartmentNodeSchema = z
   .object({
-    kind: z.literal('Department').describe('Official source entity type.'),
-    sourcePath: z.string().describe('Exact JSON pointer into this whole selected source record.'),
+    ...nodeHeader('Department'),
     id: z.number().int().describe('Gets or sets the unique identifier for the department.'),
     name: z.string().nullish().describe('Gets or sets the name of the department.'),
-    addressPath: z
-      .string()
-      .nullish()
-      .describe('Source pointer relationship for address; null/omission preserves source absence.'),
+    addressPath: pathTo('address'),
     otherAddress: z
       .string()
       .nullish()
@@ -1786,92 +1546,47 @@ const DepartmentNodeSchema = z
     email: z.string().nullish().describe('Gets or sets the email address of the department.'),
     url: z.string().nullish().describe('Gets or sets the website URL of the department.'),
   })
-  .describe('Complete Department metadata and source-path relationships.');
+  .describe('Complete Department entity.');
 const CommitteeBusinessSummaryNodeSchema = z
   .object({
-    kind: z.literal('CommitteeBusinessSummary').describe('Official source entity type.'),
-    sourcePath: z.string().describe('Exact JSON pointer into this whole selected source record.'),
+    ...nodeHeader('CommitteeBusinessSummary'),
     id: z.number().int().describe('Id of committee business.'),
     title: z.string().nullish().describe('Title of committee business.'),
-    typePath: z
-      .string()
-      .nullish()
-      .describe('Source pointer relationship for type; null/omission preserves source absence.'),
+    typePath: pathTo('type'),
     openDate: z.string().nullish().describe('Date the business started.'),
     closeDate: z.string().nullish().describe('Date the business ended.'),
-    latestReportPath: z
-      .string()
-      .nullish()
-      .describe(
-        'Source pointer relationship for latestReport; null/omission preserves source absence.',
-      ),
-    openSubmissionPeriodsPaths: z
-      .array(z.string().describe('Ordered child source pointer.'))
-      .nullish()
-      .describe(
-        'Source pointer relationship for openSubmissionPeriods; null/omission preserves source absence.',
-      ),
-    closedSubmissionPeriodsPaths: z
-      .array(z.string().describe('Ordered child source pointer.'))
-      .nullish()
-      .describe(
-        'Source pointer relationship for closedSubmissionPeriods; null/omission preserves source absence.',
-      ),
-    nextOralEvidenceSessionPath: z
-      .string()
-      .nullish()
-      .describe(
-        'Source pointer relationship for nextOralEvidenceSession; null/omission preserves source absence.',
-      ),
-    contactPath: z
-      .string()
-      .nullish()
-      .describe('Source pointer relationship for contact; null/omission preserves source absence.'),
+    latestReportPath: pathTo('latestReport'),
+    openSubmissionPeriodsPaths: pathsTo('openSubmissionPeriods'),
+    closedSubmissionPeriodsPaths: pathsTo('closedSubmissionPeriods'),
+    nextOralEvidenceSessionPath: pathTo('nextOralEvidenceSession'),
+    contactPath: pathTo('contact'),
   })
-  .describe('Complete CommitteeBusinessSummary metadata and source-path relationships.');
+  .describe('Complete CommitteeBusinessSummary entity.');
 const FileNodeSchema = z
   .object({
-    kind: z.literal('File').describe('Official source entity type.'),
-    sourcePath: z.string().describe('Exact JSON pointer into this whole selected source record.'),
+    ...nodeHeader('File'),
     fileName: z.string().nullish().describe('Gets or sets the name of the file.'),
     fileData: z.string().nullish().describe('Gets or sets the binary data of the file.'),
   })
-  .describe('Complete File metadata and source-path relationships.');
+  .describe('Complete File entity.');
 const RoleNodeSchema = z
   .object({
-    kind: z.literal('Role').describe('Official source entity type.'),
-    sourcePath: z.string().describe('Exact JSON pointer into this whole selected source record.'),
+    ...nodeHeader('Role'),
     id: z.number().int().describe('The id of the role.'),
     name: z.string().nullish().describe('The name of the role.'),
-    roleTypePath: z
-      .string()
-      .nullish()
-      .describe(
-        'Source pointer relationship for roleType; null/omission preserves source absence.',
-      ),
+    roleTypePath: pathTo('roleType'),
     isChair: z.boolean().nullish().describe('Indicates whether the role is a chair.'),
   })
-  .describe('Complete Role metadata and source-path relationships.');
+  .describe('Complete Role entity.');
 const ActivityPersonNodeSchema = z
   .object({
-    kind: z.literal('ActivityPerson').describe('Official source entity type.'),
-    sourcePath: z.string().describe('Exact JSON pointer into this whole selected source record.'),
+    ...nodeHeader('ActivityPerson'),
     id: z.number().int().describe('Gets or sets the unique identifier for the person.'),
     personId: z.number().int().nullish().describe('Gets or sets the optional person ID.'),
     name: z.string().nullish().describe('Gets or sets the name of the person.'),
     photoUrl: z.string().nullish().describe("Gets or sets the URL of the person's photo."),
-    memberInfoPath: z
-      .string()
-      .nullish()
-      .describe(
-        'Source pointer relationship for memberInfo; null/omission preserves source absence.',
-      ),
-    organisationsPaths: z
-      .array(z.string().describe('Ordered child source pointer.'))
-      .nullish()
-      .describe(
-        'Source pointer relationship for organisations; null/omission preserves source absence.',
-      ),
+    memberInfoPath: pathTo('memberInfo'),
+    organisationsPaths: pathsTo('organisations'),
     submitterType: SubmitterTypeRawSchema.nullish().describe(
       'Published source value; null or omission preserves absence.',
     ),
@@ -1885,34 +1600,29 @@ const ActivityPersonNodeSchema = z
       .nullish()
       .describe('Gets or sets the display order of the person in the activity.'),
   })
-  .describe('Complete ActivityPerson metadata and source-path relationships.');
+  .describe('Complete ActivityPerson entity.');
 const DocumentFileNodeSchema = z
   .object({
-    kind: z.literal('DocumentFile').describe('Official source entity type.'),
-    sourcePath: z.string().describe('Exact JSON pointer into this whole selected source record.'),
+    ...nodeHeader('DocumentFile'),
     fileName: z.string().nullish().describe('Gets or sets the name of the file.'),
-    fileSize: z
-      .number()
-      .int()
-      .nullish()
-      .describe('Gets or sets the size of the file in bytes. Nullable if the size is unknown.'),
+    fileSize: z.number().int().nullish().describe(FILE_SIZE_DESCRIPTION),
     fileDataFormat: FileDataFormatRawSchema.nullish().describe(
       'Published source value; null or omission preserves absence.',
     ),
     url: z.string().nullish().describe('Gets or sets the URL where the file can be accessed.'),
-    documentPurposePath: z
+    apiRoute: z
       .string()
-      .nullish()
+      .optional()
       .describe(
-        'Source pointer relationship for documentPurpose; null/omission preserves source absence.',
+        'Relative Committees API route returning this file as a base64 JSON envelope, not a public page; absent when fileDataFormat is null. mode=evidence_document reads an evidence Html route.',
       ),
+    documentPurposePath: pathTo('documentPurpose'),
     format: z.string().nullish().describe('Gets or sets the format of the file.'),
   })
-  .describe('Complete DocumentFile metadata and source-path relationships.');
+  .describe('Complete DocumentFile entity.');
 const AddressNodeSchema = z
   .object({
-    kind: z.literal('Address').describe('Official source entity type.'),
-    sourcePath: z.string().describe('Exact JSON pointer into this whole selected source record.'),
+    ...nodeHeader('Address'),
     addressLine1: z.string().nullish().describe('Gets or sets the first line of the address.'),
     addressLine2: z.string().nullish().describe('Gets or sets the second line of the address.'),
     addressLine3: z.string().nullish().describe('Gets or sets the third line of the address.'),
@@ -1920,19 +1630,17 @@ const AddressNodeSchema = z
     addressLine5: z.string().nullish().describe('Gets or sets the fifth line of the address.'),
     postcode: z.string().nullish().describe('Gets or sets the postcode of the address.'),
   })
-  .describe('Complete Address metadata and source-path relationships.');
+  .describe('Complete Address entity.');
 const RoleTypeNodeSchema = z
   .object({
-    kind: z.literal('RoleType').describe('Official source entity type.'),
-    sourcePath: z.string().describe('Exact JSON pointer into this whole selected source record.'),
+    ...nodeHeader('RoleType'),
     id: z.number().int().describe('The id of the role type.'),
     name: z.string().nullish().describe('The name of the role type.'),
   })
-  .describe('Complete RoleType metadata and source-path relationships.');
+  .describe('Complete RoleType entity.');
 const OrganisationNodeSchema = z
   .object({
-    kind: z.literal('Organisation').describe('Official source entity type.'),
-    sourcePath: z.string().describe('Exact JSON pointer into this whole selected source record.'),
+    ...nodeHeader('Organisation'),
     name: z.string().nullish().describe('Gets or sets the name of the organization.'),
     role: z.string().nullish().describe('Gets or sets the role of the organization.'),
     idmsId: z.string().nullish().describe('Gets or sets the IDMS identifier for the organization.'),
@@ -1942,11 +1650,10 @@ const OrganisationNodeSchema = z
       .nullish()
       .describe('Gets or sets the CIS identifier for the organization.'),
   })
-  .describe('Complete Organisation metadata and source-path relationships.');
+  .describe('Complete Organisation entity.');
 const DocumentPurposeNodeSchema = z
   .object({
-    kind: z.literal('DocumentPurpose').describe('Official source entity type.'),
-    sourcePath: z.string().describe('Exact JSON pointer into this whole selected source record.'),
+    ...nodeHeader('DocumentPurpose'),
     id: z.number().int().describe('Gets or sets the unique identifier for the document purpose.'),
     name: z.string().nullish().describe('Gets or sets the name of the document purpose.'),
     description: z
@@ -1960,7 +1667,7 @@ const DocumentPurposeNodeSchema = z
       .nullish()
       .describe('Gets or sets the sort order for the document purpose.'),
   })
-  .describe('Complete DocumentPurpose metadata and source-path relationships.');
+  .describe('Complete DocumentPurpose entity.');
 const SubmitterRawSchema = z.object({
   id: z.number().int().describe('Committee submitter identifier, distinct from MNIS.'),
   personId: z.number().int().nullish().describe('Source person identifier.'),
@@ -2004,16 +1711,9 @@ export const OralEvidenceRawSchema = EvidenceRawSchema.extend({
   hcNumbers: z.array(HouseNumberRawSchema).nullish().describe('Commons papers in source order.'),
 });
 const EvidenceRelationships = {
-  sourcePath: z.string().describe('Exact JSON pointer into the selected evidence record.'),
-  witnessesPaths: z
-    .array(z.string().describe('Ordered witness pointer.'))
-    .nullish()
-    .describe('Witness relationships preserving absence.'),
-  documentPath: z.string().nullish().describe('Document relationship preserving absence.'),
-  committeesPaths: z
-    .array(z.string().describe('Ordered committee pointer.'))
-    .nullish()
-    .describe('Committee relationships preserving absence.'),
+  witnessesPaths: pathsTo('witnesses', 'witness pointer'),
+  documentPath: pathTo('document'),
+  committeesPaths: pathsTo('committees', 'committee pointer'),
 };
 const WrittenEvidenceNodeSchema = WrittenEvidenceRawSchema.omit({
   witnesses: true,
@@ -2023,15 +1723,20 @@ const WrittenEvidenceNodeSchema = WrittenEvidenceRawSchema.omit({
   hcNumber: true,
 })
   .extend({
+    ...nodeHeader('WrittenEvidence'),
     ...EvidenceRelationships,
-    kind: z.literal('WrittenEvidence').describe('Official source entity type.'),
+    committeesPaths: EvidenceRelationships.committeesPaths.describe(
+      'sourcePaths of committees. mode=evidence items omit them with the committee entities; mode=evidence_detail returns them.',
+    ),
     committeeBusinessPath: z
       .string()
       .nullish()
-      .describe('Business relationship preserving absence.'),
-    hcNumberPath: z.string().nullish().describe('Paper relationship preserving absence.'),
+      .describe(
+        'sourcePath of committeeBusiness. mode=evidence items omit it with the business entity; mode=evidence_detail or mode=inquiry returns it.',
+      ),
+    hcNumberPath: pathTo('hcNumber'),
   })
-  .describe('Complete WrittenEvidence metadata and source-path relationships.');
+  .describe('Complete WrittenEvidence entity.');
 const OralEvidenceNodeSchema = OralEvidenceRawSchema.omit({
   witnesses: true,
   document: true,
@@ -2040,32 +1745,22 @@ const OralEvidenceNodeSchema = OralEvidenceRawSchema.omit({
   hcNumbers: true,
 })
   .extend({
+    ...nodeHeader('OralEvidence'),
     ...EvidenceRelationships,
-    kind: z.literal('OralEvidence').describe('Official source entity type.'),
-    committeeBusinessesPaths: z
-      .array(z.string().describe('Ordered business pointer.'))
-      .nullish()
-      .describe('Business relationships preserving absence.'),
-    hcNumbersPaths: z
-      .array(z.string().describe('Ordered paper pointer.'))
-      .nullish()
-      .describe('Paper relationships preserving absence.'),
+    committeeBusinessesPaths: pathsTo('committeeBusinesses', 'business pointer'),
+    hcNumbersPaths: pathsTo('hcNumbers', 'paper pointer'),
   })
-  .describe('Complete OralEvidence metadata and source-path relationships.');
+  .describe('Complete OralEvidence entity.');
 const SubmitterNodeSchema = SubmitterRawSchema.omit({
   memberInfo: true,
   organisations: true,
 })
   .extend({
-    kind: z.literal('Submitter').describe('Official source entity type.'),
-    sourcePath: z.string().describe('Exact JSON pointer into the selected evidence record.'),
-    memberInfoPath: z.string().nullish().describe('Member relationship preserving absence.'),
-    organisationsPaths: z
-      .array(z.string().describe('Ordered organisation pointer.'))
-      .nullish()
-      .describe('Organisation relationships preserving absence.'),
+    ...nodeHeader('Submitter'),
+    memberInfoPath: pathTo('memberInfo'),
+    organisationsPaths: pathsTo('organisations', 'organisation pointer'),
   })
-  .describe('Complete Submitter metadata and source-path relationships.');
+  .describe('Complete Submitter entity.');
 /** Every typed entity needed to reconstruct a whole committee, membership, business, publication or evidence. */
 const CommitteeEntitySchema = z.discriminatedUnion('kind', [
   WrittenEvidenceNodeSchema,
@@ -2107,30 +1802,37 @@ const CommitteeEntitySchema = z.discriminatedUnion('kind', [
   DocumentPurposeNodeSchema,
 ]);
 type CommitteeEntity = z.infer<typeof CommitteeEntitySchema>;
-/** Whole selected record; entity pointers preserve all recursive source relationships and ordering. */
-export const CommitteeRecordSchema = z.object({
-  recordId: z.string().describe('Selected source ID; namespace is identified by recordType.'),
-  recordType: z
-    .enum([
-      'committee',
-      'membership',
-      'business',
-      'publication',
-      'written_evidence',
-      'oral_evidence',
-    ])
-    .describe('Selected source record namespace.'),
-  memberId: z
-    .string()
-    .optional()
-    .describe('Members API join ID from memberInfo.mnisId only, never personId.'),
-  rootPath: z.literal('').describe('Root entity source pointer.'),
-  entities: z
-    .array(
-      CommitteeEntitySchema.describe('Complete typed entity with source pointer relationships.'),
-    )
-    .describe('All source entities in preorder; reconstruct references by sourcePath.'),
-});
+/**
+ * Whole selected record; entity pointers preserve all recursive source relationships and ordering.
+ * `record` and `items[]` reference its single `$defs` entry.
+ */
+export const CommitteeRecordSchema = z
+  .object({
+    recordId: z.string().describe('Selected source ID; namespace is identified by recordType.'),
+    recordType: z
+      .enum([
+        'committee',
+        'membership',
+        'business',
+        'publication',
+        'written_evidence',
+        'oral_evidence',
+      ])
+      .describe('Selected source record namespace.'),
+    memberId: z
+      .string()
+      .optional()
+      .describe('Members API join ID from memberInfo.mnisId only, never personId.'),
+    rootPath: z.literal('').describe('Root entity source pointer.'),
+    entities: z
+      .array(
+        CommitteeEntitySchema.describe('Complete typed entity with source pointer relationships.'),
+      )
+      .describe(
+        'All source entities in preorder. A *Path or *Paths field holds the sourcePath of each entity at that source field; reconstruct references by sourcePath. Null or absent fields mirror the source.',
+      ),
+  })
+  .meta({ id: 'CommitteeRecord' });
 function visitCommitteeDetails(
   value: CommitteeDetailsRaw,
   sourcePath: string,
@@ -2326,7 +2028,12 @@ function visitPublication(
       entities,
     );
   value.documents?.forEach((item, index) => {
-    visitDocument(item, `${sourcePath}/documents/${index}`, entities);
+    visitDocument(
+      item,
+      `${sourcePath}/documents/${index}`,
+      entities,
+      publicationDocumentRoute(value.id, item.documentId),
+    );
   });
   if (value.hcNumber != null) visitHouseNumber(value.hcNumber, `${sourcePath}/hcNumber`, entities);
   if (value.hlPaper != null) visitHouseNumber(value.hlPaper, `${sourcePath}/hlPaper`, entities);
@@ -2552,7 +2259,12 @@ function visitPublicationSummary(
       entities,
     );
   value.documents?.forEach((item, index) => {
-    visitDocument(item, `${sourcePath}/documents/${index}`, entities);
+    visitDocument(
+      item,
+      `${sourcePath}/documents/${index}`,
+      entities,
+      publicationDocumentRoute(value.id, item.documentId),
+    );
   });
   if (value.hcNumber != null) visitHouseNumber(value.hcNumber, `${sourcePath}/hcNumber`, entities);
   if (value.hlPaper != null) visitHouseNumber(value.hlPaper, `${sourcePath}/hlPaper`, entities);
@@ -2622,7 +2334,23 @@ function visitGovernmentResponse(
     visitPublicationSummary(item, `${sourcePath}/publication/${index}`, entities);
   });
 }
-function visitDocument(value: DocumentRaw, sourcePath: string, entities: CommitteeEntity[]): void {
+/** Committees API document route prefix; a file's fileDataFormat completes it. */
+function publicationDocumentRoute(publicationId: number, documentId: number): string {
+  return `/api/Publications/${publicationId}/Document/${documentId}`;
+}
+/** Evidence files are addressed by the evidence ID, not the document ID. */
+function evidenceDocumentRoute(
+  route: 'WrittenEvidence' | 'OralEvidence',
+  evidenceId: number,
+): string {
+  return `/api/${route}/${evidenceId}/Document`;
+}
+function visitDocument(
+  value: DocumentRaw,
+  sourcePath: string,
+  entities: CommitteeEntity[],
+  documentRoute: string,
+): void {
   const node = DocumentNodeSchema.parse({
     ...value,
     kind: 'Document',
@@ -2634,7 +2362,7 @@ function visitDocument(value: DocumentRaw, sourcePath: string, entities: Committ
   });
   entities.push(node);
   value.files?.forEach((item, index) => {
-    visitDocumentFile(item, `${sourcePath}/files/${index}`, entities);
+    visitDocumentFile(item, `${sourcePath}/files/${index}`, entities, documentRoute);
   });
 }
 function visitPublicationType(
@@ -2748,11 +2476,15 @@ function visitDocumentFile(
   value: DocumentFileRaw,
   sourcePath: string,
   entities: CommitteeEntity[],
+  documentRoute: string,
 ): void {
   const node = DocumentFileNodeSchema.parse({
     ...value,
     kind: 'DocumentFile',
     sourcePath,
+    ...(value.fileDataFormat == null
+      ? {}
+      : { apiRoute: `${documentRoute}/${encodeURIComponent(value.fileDataFormat)}` }),
     documentPurposePath:
       value.documentPurpose == null ? value.documentPurpose : `${sourcePath}/documentPurpose`,
   });
@@ -2854,6 +2586,7 @@ function evidenceRelationships(value: z.infer<typeof EvidenceRawSchema>) {
 function visitEvidenceRelationships(
   value: z.infer<typeof EvidenceRawSchema>,
   entities: CommitteeEntity[],
+  documentRoute: string,
 ): void {
   value.witnesses?.forEach((witness, index) => {
     const sourcePath = `/witnesses/${index}`;
@@ -2878,7 +2611,7 @@ function visitEvidenceRelationships(
       visitOrganisation(organisation, `${sourcePath}/organisations/${organisationIndex}`, entities);
     });
   });
-  if (value.document != null) visitDocument(value.document, '/document', entities);
+  if (value.document != null) visitDocument(value.document, '/document', entities, documentRoute);
   value.committees?.forEach((committee, index) => {
     visitCommitteeSummary(committee, `/committees/${index}`, entities);
   });
@@ -2897,7 +2630,7 @@ export function normalizeWrittenEvidence(
       hcNumberPath: value.hcNumber == null ? value.hcNumber : '/hcNumber',
     }),
   ];
-  visitEvidenceRelationships(value, entities);
+  visitEvidenceRelationships(value, entities, evidenceDocumentRoute('WrittenEvidence', value.id));
   if (value.committeeBusiness != null)
     visitCommitteeBusinessSummary(value.committeeBusiness, '/committeeBusiness', entities);
   if (value.hcNumber != null) visitHouseNumber(value.hcNumber, '/hcNumber', entities);
@@ -2922,7 +2655,7 @@ export function normalizeOralEvidence(
           : value.hcNumbers.map((_, index) => `/hcNumbers/${index}`),
     }),
   ];
-  visitEvidenceRelationships(value, entities);
+  visitEvidenceRelationships(value, entities, evidenceDocumentRoute('OralEvidence', value.id));
   value.committeeBusinesses?.forEach((business, index) => {
     visitCommitteeBusinessSummary(business, `/committeeBusinesses/${index}`, entities);
   });

@@ -14,9 +14,10 @@ import {
   type ParliamentCall,
   type ParliamentHttpService,
 } from '../parliament-http/parliament-http-service.js';
-import type { House, Source } from '../parliament-http/parliament-models.js';
+import type { House } from '../parliament-http/parliament-models.js';
 import {
   HansardItemSchema,
+  type HansardSortOrderSchema,
   type RawHansardItemSchema,
   RawHansardSearchSchema,
 } from './hansard-schemas.js';
@@ -30,9 +31,10 @@ export interface HansardSearchInput {
   limit: number;
   memberId?: string | undefined;
   query?: string | undefined;
+  sortOrder?: z.infer<typeof HansardSortOrderSchema> | undefined;
   startDate?: string | undefined;
 }
-function normalize(raw: z.infer<typeof RawHansardItemSchema>, source: Source) {
+function normalize(raw: z.infer<typeof RawHansardItemSchema>) {
   const {
     ItemId,
     ContributionExtId,
@@ -84,7 +86,6 @@ function normalize(raw: z.infer<typeof RawHansardItemSchema>, source: Source) {
           debateUrl: `https://hansard-api.parliament.uk/search/parlisearchredirect.json?externalId=${encodeURIComponent(rest.DebateSectionExtId)}`,
         }
       : {}),
-    source,
   });
 }
 /** Stateless source adapter; all calls share the transport's deadlines and origin backpressure. */
@@ -114,6 +115,7 @@ export class HansardService {
       'queryParameters.endDate': input.endDate,
       'queryParameters.debateSectionId':
         input.debateSectionId === undefined ? undefined : Number(input.debateSectionId),
+      'queryParameters.orderBy': input.sortOrder,
       'queryParameters.skip': cursor.offset,
       'queryParameters.take': limit,
       'queryParameters.outputType': 'List',
@@ -131,7 +133,7 @@ export class HansardService {
         'Hansard returned an empty page before its reported pagination total. Repeat ukparl_search_hansard with the same filters and no cursor or contentCursor to restart pagination; if the inconsistency persists, retry later.',
         { retryable: false },
       );
-    const items = result.data.Results.map((raw) => normalize(raw, result.source));
+    const items = result.data.Results.map(normalize);
     const repage = (count: number) => ({
       ...(input.query ? { query: input.query } : {}),
       source: result.source,

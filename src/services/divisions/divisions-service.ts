@@ -45,7 +45,7 @@ interface SelectedDivision {
   unavailableLobbies: Voter['lobby'][];
   voters: Voter[];
 }
-/** Full typed domain payload before shared byte-aware delivery. */
+/** Full typed domain payload before shared delivery. */
 export interface DivisionPayload {
   found?: boolean;
   guidance?: string;
@@ -68,6 +68,7 @@ const commonsTreatment =
   'Official Commons AyeCount and NoCount exclude tellers and are preserved as published. Teller identities and roster-derived non-teller counts are separate; no absent member is inferred to have abstained.';
 const lordsTreatment =
   'Official Lords totals include teller votes. Authoritative counts use the teller-recorded counts when tellers are present and member counts otherwise. Teller-recorded counts are vote totals, not teller headcounts. Party totals separately count listed non-tellers and tellers.';
+const tellersGlossaryUrl = 'https://www.parliament.uk/site-information/glossary/tellers/';
 
 function commonsMember(
   member: NonNullable<z.infer<typeof CommonsDivisionSchema>['Ayes']>[number],
@@ -121,12 +122,13 @@ function uniqueRows(rows: Voter[]): Voter[] {
 }
 function normalizeCommons(
   raw: z.infer<typeof CommonsDivisionSchema>,
-  source: Source,
   complete: boolean,
 ): SelectedDivision {
+  // A deferred division is decided by ballot paper and has no tellers, so its null teller lists are empty.
+  const noTellers = raw.IsDeferred === true ? [] : undefined;
   const rosters = [
-    ['aye', raw.Ayes, raw.AyeTellers],
-    ['no', raw.Noes, raw.NoTellers],
+    ['aye', raw.Ayes, raw.AyeTellers ?? noTellers],
+    ['no', raw.Noes, raw.NoTellers ?? noTellers],
     ['not_recorded', raw.NoVoteRecorded, undefined],
   ] as const;
   const voters = uniqueRows(
@@ -152,14 +154,13 @@ function normalizeCommons(
     friendlyTitle: raw.FriendlyTitle,
     remoteVotingStart: raw.RemoteVotingStart,
     remoteVotingEnd: raw.RemoteVotingEnd,
-    source,
     sourceUrl: `https://votes.parliament.uk/Votes/Commons/Division/${raw.DivisionId}`,
     detailLevel: complete ? 'complete' : 'summary',
-    rosterAvailableVia: 'ukparl_search_divisions',
-    headlineCountTreatment: commonsTreatment,
-    headlineCountExplanationUrl: 'https://www.parliament.uk/site-information/glossary/tellers/',
     ...(complete
       ? {
+          rosterAvailableVia: 'ukparl_search_divisions' as const,
+          headlineCountTreatment: commonsTreatment,
+          headlineCountExplanationUrl: tellersGlossaryUrl,
           rosterSelectors: rosters.map(([lobby, members, tellers]) => ({
             lobby,
             membersKnown: members != null,
@@ -189,7 +190,6 @@ function normalizeCommons(
 }
 function normalizeLords(
   raw: z.infer<typeof LordsDivisionSchema>,
-  source: Source,
   complete: boolean,
 ): SelectedDivision {
   const rosters = [
@@ -231,14 +231,13 @@ function normalizeLords(
       remoteVotingStart: raw.remoteVotingStart,
       remoteVotingEnd: raw.remoteVotingEnd,
       divisionWasExclusivelyRemote: raw.divisionWasExclusivelyRemote,
-      source,
       sourceUrl: `https://votes.parliament.uk/Votes/Lords/Division/${raw.divisionId}`,
       detailLevel: complete ? 'complete' : 'summary',
-      rosterAvailableVia: 'ukparl_search_divisions',
-      headlineCountTreatment: lordsTreatment,
-      headlineCountExplanationUrl: 'https://www.parliament.uk/site-information/glossary/tellers/',
       ...(complete
         ? {
+            rosterAvailableVia: 'ukparl_search_divisions' as const,
+            headlineCountTreatment: lordsTreatment,
+            headlineCountExplanationUrl: tellersGlossaryUrl,
             rosterSelectors: rosters.map(([lobby, members, tellers]) => ({
               lobby,
               membersKnown: members != null,
@@ -268,18 +267,15 @@ export class DivisionsService {
   /** Fetch one selected source only; a true 404 becomes a typed not-found payload. */
   async execute(input: DivisionSelection, call: ParliamentCall) {
     const { cursor: _cursor, ...selection } = input;
+    const { limit: _limit, ...filters } = selection;
     const api = input.house === 'commons' ? 'commons_votes' : 'lords_votes';
     const base: DivisionPayload = { mode: input.mode, house: input.house, selection };
-    const binding = {
-      source: api,
-      selector: input.mode,
-      filters: selection,
-      nativePageSize: input.limit,
-    };
+    // Offset cursors leave limit out of the binding so a continuation resumes under any limit.
+    const binding = { source: api, selector: input.mode, filters, nativePageSize: input.limit };
     const cursor = readCollectionCursor(input.cursor, binding);
+    let source: Source;
     if (input.mode === 'search') {
       let records: Division[];
-      let source: Source;
       if (input.house === 'commons') {
         const query: ParliamentQuery = {
           'queryParameters.searchTerm': input.query,
@@ -317,7 +313,7 @@ export class DivisionsService {
         );
         source = response.source;
         records = response.data.map(({ raw, memberVote }) => ({
-          ...normalizeCommons(raw, source, false).record,
+          ...normalizeCommons(raw, false).record,
           ...(memberVote ? { memberVote } : {}),
         }));
       } else {
@@ -357,7 +353,7 @@ export class DivisionsService {
         );
         source = response.source;
         records = response.data.map(({ raw, memberVote }) => ({
-          ...normalizeLords(raw, source, false).record,
+          ...normalizeLords(raw, false).record,
           ...(memberVote ? { memberVote } : {}),
         }));
       }
@@ -383,7 +379,8 @@ export class DivisionsService {
           `/data/division/${input.divisionId}.json`,
           CommonsDivisionSchema,
         );
-        selected = normalizeCommons(response.data, response.source, true);
+        selected = normalizeCommons(response.data, true);
+        source = response.source;
       } else {
         const response = await this.http.get(
           call,
@@ -391,7 +388,8 @@ export class DivisionsService {
           `/data/Divisions/${input.divisionId}`,
           LordsDivisionSchema,
         );
-        selected = normalizeLords(response.data, response.source, true);
+        selected = normalizeLords(response.data, true);
+        source = response.source;
       }
     } catch (error) {
       if (!(error instanceof McpError) || error.code !== JsonRpcErrorCode.NotFound) throw error;
@@ -403,7 +401,7 @@ export class DivisionsService {
       };
       return { payload, count: 0, repage: () => payload };
     }
-    const full = { ...base, found: true, record: selected.record, source: selected.record.source };
+    const full = { ...base, found: true, record: selected.record, source };
     if (input.mode === 'detail') return { payload: full, count: 0, repage: () => full };
     const unavailable = selected.unavailableLobbies.filter(
       (lobby) => !input.lobby || input.lobby === lobby,

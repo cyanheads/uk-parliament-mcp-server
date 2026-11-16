@@ -2,6 +2,15 @@
  * @fileoverview Decode public JSON blocks independently of the production formatter.
  * @module tests/tools/rendered-payload
  */
+import type { runToolContract } from '@cyanheads/mcp-ts-core/testing';
+
+/** Every text block of a tool result, joined as an MCP client reads them. */
+export function text(result: Awaited<ReturnType<typeof runToolContract>>): string {
+  return result.content
+    .filter((block) => block.type === 'text')
+    .map((block) => block.text)
+    .join('\n');
+}
 
 /** Reconstruct the payload and named enrichment blocks from text shown to MCP clients. */
 export function renderedPayload(text: string): Record<string, unknown> {

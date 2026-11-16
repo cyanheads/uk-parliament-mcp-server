@@ -1,6 +1,6 @@
 # uk-parliament-mcp-server - Directory Structure
 
-Generated on: 2026-10-26 03:37:14
+Generated on: 2026-11-16 01:47:23
 
 ```text
 uk-parliament-mcp-server/
@@ -135,6 +135,9 @@ uk-parliament-mcp-server/
 │   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
+├── skills/
+│   └── uk-parliament-guide/
+│       └── SKILL.md
 ├── src/
 │   ├── mcp-server/
 │   │   ├── prompts/
@@ -151,7 +154,8 @@ uk-parliament-mcp-server/
 │   │           ├── ukparl-search-divisions.tool.ts
 │   │           ├── ukparl-search-hansard.tool.ts
 │   │           ├── ukparl-search-members.tool.ts
-│   │           └── ukparl-search-questions.tool.ts
+│   │           ├── ukparl-search-questions.tool.ts
+│   │           └── ukparl-search-statements.tool.ts
 │   ├── services/
 │   │   ├── bills/
 │   │   │   ├── bills-schemas.ts
@@ -170,13 +174,17 @@ uk-parliament-mcp-server/
 │   │   │   ├── member-normalization.ts
 │   │   │   └── members-service.ts
 │   │   ├── parliament-http/
+│   │   │   ├── answering-body-filter.ts
 │   │   │   ├── parliament-cursors.ts
 │   │   │   ├── parliament-delivery.ts
 │   │   │   ├── parliament-http-service.ts
 │   │   │   └── parliament-models.ts
-│   │   └── questions/
-│   │       ├── question-models.ts
-│   │       └── questions-service.ts
+│   │   ├── questions/
+│   │   │   ├── question-models.ts
+│   │   │   └── questions-service.ts
+│   │   └── statements/
+│   │       ├── statement-models.ts
+│   │       └── statements-service.ts
 │   └── index.ts
 ├── tests/
 │   ├── fuzz/
@@ -207,9 +215,13 @@ uk-parliament-mcp-server/
 │   │   │   ├── parliament-delivery.test.ts
 │   │   │   ├── parliament-http-service.test.ts
 │   │   │   └── parliament-wire-budget.test.ts
-│   │   └── questions/
-│   │       ├── questions-fixtures.ts
-│   │       └── questions-service.test.ts
+│   │   ├── questions/
+│   │   │   ├── questions-fixtures.ts
+│   │   │   └── questions-service.test.ts
+│   │   └── statements/
+│   │       ├── statement-models.test.ts
+│   │       ├── statements-fixtures.ts
+│   │       └── statements-service.test.ts
 │   ├── smoke/
 │   └── tools/
 │       ├── rendered-payload.test.ts
@@ -222,7 +234,8 @@ uk-parliament-mcp-server/
 │       ├── ukparl-search-divisions.test.ts
 │       ├── ukparl-search-hansard.test.ts
 │       ├── ukparl-search-members.test.ts
-│       └── ukparl-search-questions.test.ts
+│       ├── ukparl-search-questions.test.ts
+│       └── ukparl-search-statements.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitattributes
@@ -233,6 +246,7 @@ uk-parliament-mcp-server/
 ├── bun.lock
 ├── bunfig.toml
 ├── CHANGELOG.md
+├── CITATION.cff
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile

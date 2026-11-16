@@ -2,8 +2,8 @@
 
 **Server:** uk-parliament-mcp-server
 **Version:** 0.1.2
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.18`
-**Engines:** Bun ≥1.4.0, Node ≥24.0.0
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.22`
+**Engines:** Bun ≥1.4.4, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.4.0
 **Zod:** ^4.6.7
 
@@ -50,18 +50,18 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 
 ### Tool boundaries
 
-Read `src/mcp-server/tools/definitions/ukparl-search-bills.tool.ts` for summary discovery and `ukparl-get-member.tool.ts` for section selection. All nine tools are read-only, idempotent, and open-world. No resources or prompts are registered.
+Read `src/mcp-server/tools/definitions/ukparl-search-bills.tool.ts` for summary discovery and `ukparl-get-member.tool.ts` for section selection. All ten tools are read-only, idempotent, and open-world. No resource or prompt definitions are registered; `resources/list` carries only the published skill, `skill://uk-parliament-guide/SKILL.md`.
 
 - Validate mode/section combinations before I/O; never silently drop an incompatible filter. Resolve filter IDs through `ukparl_lookup_reference`.
 - Start a disposable call with `using call = getParliamentHttp().beginCall(ctx)`; share it across every related request so cancellation and the 45-second deadline cover the entire operation.
-- Pass validated source records to `deliverPayload`, including the actual collection `repage` function, same-selection `contentCursor`, retained provenance, and `enrichmentFor` / `applyEnrichment`.
-- Render through `formatData` and `enrichmentField`. Whole records paginate before an indivisible record uses `delivery: outline|fragment`; both MCP surfaces retain the same values, including source HTML and missing/null states.
+- Pass validated source records to `deliverPayload`, including the actual collection `repage` function, same-selection `contentCursor`, retained provenance, and `enrichmentFor` / `applyEnrichment`. `repage(count)` rebuilds the payload for the first `count` records: exactly one array grows with `count`, and `repage(count - 1)` (0 included) must build, because delivery diffs the two to find the record array.
+- Render through `formatData` and `enrichmentField`. The caller's `limit` sets the page size; only a record whose own JSON passes 24,000 UTF-8 bytes uses `delivery: outline|fragment`, and those replies fit 24,000 bytes. Both MCP surfaces retain the same values, including source HTML and missing/null states.
 
 ### Sources and identifiers
 
 Seven official API origins are fixed in `src/services/parliament-http/parliament-http-service.ts`. Requests are HTTPS GETs with verified relative routes and query allowlists; published links remain output data, never request targets. No server-specific environment variables, API keys, persisted corpus, or personal-data cache are used.
 
-Keep bill-specific stage occurrences distinct from reference stage IDs, division IDs scoped to their House, question IDs distinct from UINs, and committee person IDs distinct from Members API join keys. Search records are summaries. Only supplied authoritative legislation.gov.uk links establish a statute handoff. Preserve source coverage caveats, especially Hansard's incomplete historical coverage.
+Keep bill-specific stage occurrences distinct from reference stage IDs, division IDs scoped to their House, question and statement IDs distinct from UINs, and committee person IDs distinct from Members API join keys. Search records are summaries. Only supplied authoritative legislation.gov.uk links establish a statute handoff. Preserve source coverage caveats, especially Hansard's incomplete historical coverage.
 
 ### Context used here
 
@@ -122,16 +122,19 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 
 ```text
 src/
-  index.ts                             # Nine tools; stateless HTTP default
+  index.ts                             # Ten tools and the published skills; stateless HTTP default
   mcp-server/tools/definitions/         # ukparl-*.tool.ts
   services/
-    parliament-http/                   # Fixed origins, queues, cursors, delivery
+    parliament-http/                   # Fixed origins, queues, cursors, delivery, answering-body check
     bills/                             # Bills and scrutiny records
     members/                           # Member metadata and histories
     divisions/                         # House-scoped votes and rosters
     hansard/                           # Spoken contributions and coverage
     questions/                         # Written questions and answers
+    statements/                        # Written ministerial statements
     committees/                        # Committee business and evidence metadata
+skills/
+  uk-parliament-guide/SKILL.md         # Published agent skill: identifier chains and gates, served over MCP
 ```
 
 ---
@@ -231,7 +234,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 ## Bundling
 
-`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. `mcpb pack` reads `.mcpbignore`, not `.gitignore`, so excluded root paths need root-anchored lines (`/docs/`, never `docs/`, which also strips dependency docs). Root `skills/` ships on purpose. The pack step runs `scripts/clean-mcpb.ts`, which prunes dev dependencies and strips dependency-shipped agent docs, platform-specific native bindings, node-gyp build output containing machine paths (compiled `*.node` addons stay), and build-only framework files and `better-sqlite3` C sources. DataCanvas's optional DuckDB native is omitted from portable bundles; canvas tools report an install hint while other tools work normally. MCPB is stdio-only. Consumers who do not need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
+`npm run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. `mcpb pack` reads `.mcpbignore`, not `.gitignore`, so excluded root paths need root-anchored lines (`/docs/`, never `docs/`, which also strips dependency docs). Root `skills/` ships on purpose. The pack step runs `scripts/clean-mcpb.ts`, which prunes dev dependencies and strips dependency-shipped agent docs (agent directories and `AGENTS.md`/`CLAUDE.md` at a package's root, `SKILL.md` anywhere; a `skills/` deeper in a package is runtime code and stays), platform-specific native bindings, node-gyp build output containing machine paths (compiled `*.node` addons stay), and build-only framework files and `better-sqlite3` C sources. DataCanvas's optional DuckDB native is omitted from portable bundles; canvas tools report an install hint while other tools work normally. MCPB is stdio-only. Consumers who do not need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
 
 **Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match, that every `user_config` option is wired into `mcp_config.env` as `"X": "${user_config.X}"` (the host substitutes nothing else — `"${X}"` reaches the server as that literal string), and that an optional string option carries `"default": ""`.
 
@@ -298,7 +301,7 @@ import { getParliamentHttp } from '@/services/parliament-http/parliament-http-se
 - [ ] If wrapping external API: raw/domain/output schemas reviewed against real upstream sparsity/nullability before finalizing required vs optional fields
 - [ ] If wrapping external API: normalization and `format()` preserve uncertainty; do not fabricate facts from missing upstream data
 - [ ] If wrapping external API: tests include at least one sparse payload case with omitted upstream fields
-- [ ] Registered directly in the `createApp()` tools array; nine tools, no resources or prompts
+- [ ] Registered directly in the `createApp()` tools array; ten tools, no resources or prompts
 - [ ] Tests use `createMockContext()` from `@cyanheads/mcp-ts-core/testing`
 - [ ] Root `plugin.json` and `mcp.json` populated for Agent Plugins 1.0.0: manifest metadata from `package.json`, unscoped name, one stdio server using `npx -y <full package name>`, and only the fixed `env` shared with `.codex-plugin/mcp.json`. Keep the Codex overlay's `mcpServers` pointer so it forwards any declared `env_vars`.
 - [ ] `.codex-plugin/plugin.json` populated — `name`, `version`, `description`, `repository`, `license` from `package.json`; `interface.displayName` = the unscoped repo name (never the npm scope — `lint:packaging` enforces this); `interface.shortDescription` from `package.json` description

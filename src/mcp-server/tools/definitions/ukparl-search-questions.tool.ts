@@ -4,6 +4,7 @@
  */
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, validationError } from '@cyanheads/mcp-ts-core/errors';
+import { canonicalAnsweringBodyIds } from '@/services/parliament-http/answering-body-filter.js';
 import { pageFor, readCollectionCursor } from '@/services/parliament-http/parliament-cursors.js';
 import {
   DeliveryShape,
@@ -26,6 +27,7 @@ import {
 import { QuestionRecordSchema } from '@/services/questions/question-models.js';
 import { getQuestions } from '@/services/questions/questions-service.js';
 
+const LIMIT_CAP = 100;
 const FiltersSchema = z.object({
   query: z.string().optional().describe('Content search terms.'),
   uin: z
@@ -85,7 +87,9 @@ const OutputSchema = z.object({
   ),
   found: z.boolean().optional().describe('Detail lookup success; false requires guidance.'),
   page: PageSchema.optional().describe('Whole-question search continuation.'),
-  source: SourceSchema.optional().describe('Actual selected official request.'),
+  source: SourceSchema.optional().describe(
+    'Actual selected official request; provenance for every returned question.',
+  ),
   guidance: z.string().optional().describe('Same-tool recovery for missing or empty selections.'),
 });
 
@@ -144,7 +148,7 @@ export const ukparlSearchQuestions = tool('ukparl_search_questions', {
     limit: LimitSchema.removeDefault()
       .optional()
       .describe(
-        'Search page size, default 10, cap 20; larger safe integers are capped. Omit in detail.',
+        'Search page size, default 10, cap 100; larger safe integers are capped. Omit in detail.',
       ),
     contentCursor: optionalText(z.string().min(1)).describe(
       'Opaque lossless content continuation for this same selection.',
@@ -160,7 +164,11 @@ export const ukparlSearchQuestions = tool('ukparl_search_questions', {
     total: z.number().int().optional().describe('Upstream total when known.'),
     truncated: z.boolean().optional().describe('Further whole search results remain.'),
     shown: z.number().int().optional().describe('Actually emitted whole search results.'),
-    cap: z.number().int().optional().describe('Effective search page-size cap.'),
+    cap: z
+      .number()
+      .int()
+      .optional()
+      .describe('Search page-size ceiling; a larger limit is clamped to it.'),
   },
   enrichmentTrailer: {
     applied: { render: enrichmentField('applied') },
@@ -270,7 +278,23 @@ export const ukparlSearchQuestions = tool('ukparl_search_questions', {
       thrownBy: 'service',
       when: 'Selected content changed during retrieval.',
       recovery:
-        'Repeat the same tool with its original filters and no contentCursor, then follow the new content cursors.',
+        'Repeat the same tool with its original filters and any collection cursor, but no contentCursor, then follow the new content cursors.',
+    },
+    {
+      reason: 'call_deadline_exceeded',
+      code: JsonRpcErrorCode.Timeout,
+      thrownBy: 'service',
+      when: 'The 45-second call deadline elapsed before the official API answered.',
+      recovery:
+        'Repeat ukparl_search_questions once after a short wait; if it times out again, use a shorter tabledFrom to tabledTo window, a memberId or answeringBodyIds, or a more specific query.',
+    },
+    {
+      reason: 'http_server_error',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      thrownBy: 'service',
+      when: 'The official API returned an HTTP 5xx server error.',
+      recovery:
+        'Repeat ukparl_search_questions with a shorter tabledFrom to tabledTo window, a memberId or answeringBodyIds, or a more specific query; retry later if it still fails.',
     },
   ],
   async handler(input, ctx) {
@@ -280,10 +304,7 @@ export const ukparlSearchQuestions = tool('ukparl_search_questions', {
       uin: input.uin?.slice(0, 2).toLowerCase() === 'hl' ? `HL${input.uin.slice(2)}` : input.uin,
       memberId: input.memberId,
       answeringMemberId: input.answeringMemberId,
-      answeringBodyIds:
-        input.answeringBodyIds === undefined
-          ? undefined
-          : [...new Set(input.answeringBodyIds)].sort((a, b) => Number(a) - Number(b)),
+      answeringBodyIds: canonicalAnsweringBodyIds(input.answeringBodyIds),
       house: input.house,
       answered: input.answered,
       tabledFrom: input.tabledFrom,
@@ -311,7 +332,8 @@ export const ukparlSearchQuestions = tool('ukparl_search_questions', {
     validateDateRange(input.tabledFrom, input.tabledTo);
     validateDateRange(input.answeredFrom, input.answeredTo);
     const requestedLimit = input.limit ?? 10;
-    const limit = Math.min(20, requestedLimit);
+    const limit = Math.min(LIMIT_CAP, requestedLimit);
+    const capped = requestedLimit > LIMIT_CAP;
     const applied = AppliedSchema.parse({
       mode,
       source: 'questions',
@@ -330,8 +352,8 @@ export const ukparlSearchQuestions = tool('ukparl_search_questions', {
         : {}),
       dateSemantics: 'inclusive calendar dates; no implicit date window',
     });
-    const notice = `${LICENCE_NOTICE} ${mode === 'search' ? 'Question and answer text are previews; retrieve mode=detail with questionId before quoting a complete answer.' : 'Complete source question and answer content; attachment metadata and links only, no files downloaded.'}${requestedLimit > 20 ? ` Requested limit ${requestedLimit} is capped at 20.` : ''}`;
-    const enrichment = { applied, notice, ...(requestedLimit > 20 ? { requestedLimit } : {}) };
+    const notice = `${LICENCE_NOTICE} ${mode === 'search' ? 'Question and answer text are previews; retrieve mode=detail with questionId before quoting a complete answer.' : 'Complete source question and answer content; attachment metadata and links only, no files downloaded.'}${capped ? ` Requested limit ${requestedLimit} is capped at ${LIMIT_CAP}.` : ''}`;
+    const enrichment = { applied, notice, ...(capped ? { requestedLimit } : {}) };
     const selection = { mode, questionId, filters, limit, cursor: input.cursor };
     if (mode === 'detail') {
       using call = getParliamentHttp().beginCall(ctx);
@@ -352,7 +374,6 @@ export const ukparlSearchQuestions = tool('ukparl_search_questions', {
               ...response.data.value,
               questionId: String(response.data.value.id),
               links: response.data.links,
-              source: response.source,
               detailLevel: 'complete',
             }),
           }
@@ -396,7 +417,6 @@ export const ukparlSearchQuestions = tool('ukparl_search_questions', {
         ...row.value,
         questionId: String(row.value.id),
         links: row.links,
-        source: response.source,
         detailLevel: 'summary',
         followUp: `Call ukparl_search_questions with mode=detail and questionId=${row.value.id} for complete question text, answer HTML and attachment metadata.`,
       }),
@@ -429,7 +449,7 @@ export const ukparlSearchQuestions = tool('ukparl_search_questions', {
         total: selected.page.total,
         truncated: selected.page.hasMore,
         shown: selected.page.returned,
-        cap: limit,
+        cap: LIMIT_CAP,
         notice: `${notice}${selected.page.returned === 0 ? ' No questions matched; broaden the search or reduce filters.' : ''}`,
       }),
       applyEnrichment: (values) => ctx.enrich(values),
